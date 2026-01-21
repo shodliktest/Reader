@@ -189,35 +189,44 @@ with c3: st.metric("📅 Bugun", datetime.now().strftime("%d-%m-%Y"))
 
 tab1, tab2 = st.tabs(["📢 Xabar Tarqatish", "📋 Ma'lumotlar Bazasi"])
 
+# 1-TAB: Xabar yuborish (Broadcast)
 with tab1:
-    st.subheader("Barcha foydalanuvchilarga xabar yuborish")
-    msg_text = st.text_area("Xabar matni:", placeholder="Salom...")
+    st.subheader("Hammaga xabar yuborish")
+    broadcast_text = st.text_area("Xabar matnini kiriting:", height=100)
     
-    if st.button("Yuborishni boshlash"):
+    if st.button("🚀 Xabarni Yuborish"):
         if df.empty:
-            st.error("Bazada foydalanuvchilar yo'q!")
-        elif not msg_text:
+            st.warning("Foydalanuvchilar yo'q!")
+        elif not broadcast_text:
             st.warning("Xabar matni bo'sh!")
         else:
-            ids = df['user_id'].tolist()
-            prog = st.progress(0, text="Tayyorlanmoqda...")
-            s_count, f_count = 0, 0
+            # Lug'at ko'rinishida e'lon qilamiz (nonlocal xatosini oldini oladi)
+            stats = {"success": 0, "fail": 0}
             
-            # Broadcast uchun alohida vaqtinchalik loop
-            async def broadcast():
-                nonlocal s_count, f_count
+            user_ids = df['user_id'].tolist()
+            progress_bar = st.progress(0, text="Yuborish boshlandi...")
+            
+            async def send_broadcast():
                 temp_bot = Bot(token=BOT_TOKEN)
-                for i, uid in enumerate(ids):
+                for i, user_id in enumerate(user_ids):
                     try:
-                        await temp_bot.send_message(uid, msg_text, parse_mode="HTML")
-                        s_count += 1
-                    except:
-                        f_count += 1
-                    prog.progress((i + 1) / len(ids), text=f"Yuborilmoqda: {i+1}/{len(ids)}")
+                        await temp_bot.send_message(chat_id=user_id, text=broadcast_text, parse_mode="HTML")
+                        stats["success"] += 1
+                    except Exception:
+                        stats["fail"] += 1
+                    
+                    # Progress barni yangilash
+                    percent = (i + 1) / len(user_ids)
+                    progress_bar.progress(percent, text=f"Yuborilmoqda... {i+1}/{len(user_ids)}")
+                
                 await temp_bot.session.close()
 
-            asyncio.run(broadcast())
-            st.success(f"✅ Tugadi! Yetkazildi: {s_count}, Bloklangan: {f_count}")
+            # Ishga tushirish
+            asyncio.run(send_broadcast())
+            
+            progress_bar.progress(1.0, text="Yakunlandi!")
+            st.success(f"✅ Natija:\n- Yuborildi: {stats['success']} ta\n- Yetib bormadi (blok): {stats['fail']} ta")
+
 
 with tab2:
     st.subheader("Foydalanuvchilar jadvali")
@@ -230,3 +239,4 @@ with tab2:
 st.sidebar.markdown(f"**Admin ID:** `{ADMIN_ID}`")
 if st.sidebar.button("🔄 Sahifani yangilash"):
     st.rerun()
+
