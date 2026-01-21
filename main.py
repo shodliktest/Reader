@@ -4,257 +4,229 @@ import os
 import threading
 import sqlite3
 import pytz
+import pandas as pd
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
+from aiogram.client.default import DefaultBotProperties
 import yt_dlp
+import time
 
-# --- 1. SOZLAMALAR (SECRETS) ---
+# --- 1. SOZLAMALAR ---
 try:
     BOT_TOKEN = st.secrets["BOT_TOKEN"]
     ADMIN_ID = int(st.secrets["ADMIN_ID"])
-except:
-    st.error("❌ Xatolik: Secrets topilmadi! .streamlit/secrets.toml faylini tekshiring.")
+except Exception:
+    st.error("❌ Secrets topilmadi! .streamlit/secrets.toml faylini tekshiring.")
     st.stop()
 
-# --- 2. BAZA (Foydalanuvchilar) ---
+# --- 2. DATABASE (SQLite) ---
 DB_FILE = "users.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, join_date TEXT)''')
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users
+                     (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, join_date TEXT)''')
+        conn.commit()
 
 def add_user_to_db(user: types.User):
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c = conn.cursor()
-    tz = pytz.timezone('Asia/Tashkent')
-    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    try:
+    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
+        c = conn.cursor()
+        tz = pytz.timezone('Asia/Tashkent')
+        now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", 
                   (user.id, user.full_name, user.username, now))
         conn.commit()
-    except: pass
-    finally: conn.close()
 
 def get_all_users_data():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    import pandas as pd
     try:
-        df = pd.read_sql_query("SELECT * FROM users", conn)
-    except:
-        df = pd.DataFrame()
-    conn.close()
-    return df
+        with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
+            return pd.read_sql_query("SELECT * FROM users", conn)
+    except Exception:
+        return pd.DataFrame()
 
-# --- 3. VIDEO YUKLASH TIZIMI (Navbat bilan) ---
-async def download_worker(queue, bot):
-    """
-    Bu funksiya orqa fonda tinimsiz ishlab turadi va 
-    navbatdagi videolarni yuklaydi.
-    """
+# --- 3. DOWNLOADER LOGIC ---
+async def download_worker(queue, bot: Bot):
+    """Navbatdagi videolarni yuklovchi worker"""
     while True:
         url, message = await queue.get()
+        status_msg = None
+        filename = None
         try:
-            # 1. Foydalanuvchiga xabar: Navbatga olindi
             status_msg = await message.reply("⏳ **So'rovingiz qabul qilindi...**\nVideo yuklash boshlanmoqda, iltimos kuting.")
             
             temp_dir = "downloads"
             os.makedirs(temp_dir, exist_ok=True)
-            output_template = f"{temp_dir}/%(id)s.%(ext)s"
+            # Fayl nomida ID ishlatamiz (conflictlarni oldini olish uchun)
+            output_template = os.path.join(temp_dir, f"{message.from_user.id}_%(id)s.%(ext)s")
 
             ydl_opts = {
-                'format': 'best[ext=mp4]/best', # MP4 formatga harakat qiladi
+                'format': 'best[ext=mp4]/best',
                 'outtmpl': output_template,
-                'max_filesize': 50 * 1024 * 1024, # 50MB limit
+                'max_filesize': 50 * 1024 * 1024,
                 'noplaylist': True,
-                'quiet': True
+                'quiet': True,
+                'no_warnings': True
             }
 
-            # 2. Videoni serverga yuklab olish
             loop = asyncio.get_event_loop()
             info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
             
-            filename = ydl_opts['outtmpl'] % info
-            # Agar format o'zgargan bo'lsa (mkv), faylni topish
+            # Haqiqiy fayl nomini aniqlash
+            filename = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info)
+            # Ba'zida kengaytma o'zgarishi mumkin
             if not os.path.exists(filename):
-                base_name = filename.rsplit('.', 1)[0]
+                base = os.path.splitext(filename)[0]
                 for f in os.listdir(temp_dir):
-                    if f.startswith(os.path.basename(base_name)):
+                    if f.startswith(os.path.basename(base)):
                         filename = os.path.join(temp_dir, f)
                         break
-            
-            # 3. Hajmni tekshirish va Telegramga yuborish
+
             if os.path.exists(filename):
                 file_size = os.path.getsize(filename)
                 if file_size > 50 * 1024 * 1024:
-                    await status_msg.edit_text("❌ **Kechirasiz, video hajmi 50MB dan katta.**\nTelegram limiti tufayli yubora olmayman.")
+                    await status_msg.edit_text("❌ **Hajm juda katta (Max: 50MB).**\nTelegram botlar 50MB dan ortiq faylni yubora olmaydi.")
                 else:
                     await status_msg.edit_text("🚀 **Telegramga yuklanmoqda...**")
                     video_input = FSInputFile(filename)
-                    
-                    # Chiroyli izoh (Caption)
                     caption = (f"🎬 **{info.get('title', 'Video')}**\n\n"
-                               f"👤 **Buyurtmachi:** {message.from_user.mention_html()}\n"
+                               f"👤 **Foydalanuvchi:** {message.from_user.mention_html()}\n"
                                f"🤖 **Bot:** @{(await bot.get_me()).username}")
                     
                     await message.answer_video(video_input, caption=caption, parse_mode="HTML")
-                    await status_msg.delete() # Eski "kuting" xabarini o'chiramiz
-                
-                # Serverdan o'chirish
-                os.remove(filename)
+                    await status_msg.delete()
             else:
-                await status_msg.edit_text("❌ Video fayli topilmadi.")
+                await status_msg.edit_text("❌ Xatolik: Video yuklanmadi.")
 
         except Exception as e:
-            # Xatolik bo'lsa
-            await message.reply(f"❌ **Xatolik yuz berdi:**\nVideo topilmadi yoki havola noto'g'ri.\n({e})")
+            if status_msg:
+                await status_msg.edit_text(f"❌ **Xatolik:**\nLink noto'g'ri yoki video juda katta.\n({str(e)[:50]}...)")
         finally:
+            if filename and os.path.exists(filename):
+                try: os.remove(filename)
+                except: pass
             queue.task_done()
 
-# --- 4. BOT MANTIQI ---
+# --- 4. BOT HANDLERS ---
 async def start_bot_process():
-    bot = Bot(token=BOT_TOKEN)
+    # Killer Webhook & Singleton protection
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     init_db()
     
-    # Navbat (Queue) yaratish
     queue = asyncio.Queue()
-    # Workerni ishga tushirish
     asyncio.create_task(download_worker(queue, bot))
 
-    # /start komandasi
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
         add_user_to_db(message.from_user)
         await message.answer(f"👋 **Salom, {message.from_user.full_name}!**\n\n"
-                             "🎥 Menga YouTube video havolasini yuboring.\n"
-                             "📝 Agar admin bilan bog'lanmoqchi bo'lsangiz, shunchaki xabar yozing.")
+                             "🎥 YouTube havolasini yuboring, men uni yuklab beraman.")
 
-    # Admin javobi (Reply)
     @dp.message(F.reply_to_message)
     async def admin_reply(message: types.Message):
-        # Faqat admin reply qilsa
-        if message.from_user.id == ADMIN_ID:
+        if message.from_user.id == ADMIN_ID and message.reply_to_message.forward_from:
             try:
-                # Agar user forward qilingan bo'lsa
-                if message.reply_to_message.forward_from:
-                    user_id = message.reply_to_message.forward_from.id
-                    await bot.copy_message(chat_id=user_id, from_chat_id=message.chat.id, message_id=message.message_id)
-                    await message.react([types.ReactionTypeEmoji(emoji="👍")]) # Admin xabariga like
-                else:
-                    await message.reply("⚠️ User profili yopiq, javob yuborib bo'lmadi.")
-            except Exception as e:
-                await message.reply(f"Xatolik: {e}")
+                user_id = message.reply_to_message.forward_from.id
+                await bot.copy_message(chat_id=user_id, from_chat_id=message.chat.id, message_id=message.message_id)
+                await message.set_reaction(reactions=[types.ReactionTypeEmoji(emoji="👍")])
+            except:
+                await message.reply("⚠️ Xabar yuborilmadi (User bloklagan yoki profil yopiq).")
 
-    # Barcha xabarlar
     @dp.message()
     async def handle_all(message: types.Message):
-        text = message.text or ""
-        # Link tekshirish
-        if "youtube.com" in text or "youtu.be" in text:
-            await queue.put((text, message)) # Navbatga qo'shish
-        # Agar admin bo'lmasa, xabarni adminga forward qilish
+        if not message.text: return
+        
+        url_keywords = ["youtube.com", "youtu.be", "shorts"]
+        if any(key in message.text for key in url_keywords):
+            await queue.put((message.text, message))
         elif message.from_user.id != ADMIN_ID:
             await message.forward(chat_id=ADMIN_ID)
             await message.answer("📨 **Xabaringiz adminga yetkazildi.**")
 
-    # KILLER WEBHOOK: Eski "osilgan" xabarlarni tozalash
+    # Killer: Tozalash va Polling boshlash
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Botni ishga tushirish
     await dp.start_polling(bot)
 
-# --- 5. GLOBAL SINGLETON (Bot faqat 1 marta ishga tushadi) ---
-def run_bot_in_background():
-    # Hozirgi barcha threadlarni tekshiramiz
-    for thread in threading.enumerate():
-        if thread.name == "BotThread":
-            return # Agar bot ishlayotgan bo'lsa, qayta tushirmaymiz
+# --- 5. SINGLETON THREAD GUARD ---
+def bot_control():
+    if "bot_active" not in st.session_state:
+        # Eski threadni qidirish
+        existing_thread = False
+        for thread in threading.enumerate():
+            if thread.name == "BotThread":
+                existing_thread = True
+                break
+        
+        if not existing_thread:
+            def run_loop():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(start_bot_process())
+            
+            t = threading.Thread(target=run_loop, name="BotThread", daemon=True)
+            t.start()
+            st.session_state.bot_active = True
 
-    # Yangi thread ochamiz
-    def loop_wrapper():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_bot_process())
-
-    t = threading.Thread(target=loop_wrapper, name="BotThread", daemon=True)
-    t.start()
-
-# Botni fon rejimida yoqish
-run_bot_in_background()
+bot_control()
 
 # --- 6. ADMIN PANEL (Streamlit) ---
-st.set_page_config(page_title="YouTube Bot Admin", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Admin Panel", page_icon="⚙️", layout="wide")
 
-st.title("🤖 Bot Boshqaruv Markazi")
-st.markdown("---")
+st.title("🚀 YouTube Downloader Admin Panel")
+st.divider()
 
-# Statistika qismi
+# Statistika
 df = get_all_users_data()
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("👥 Jami Foydalanuvchilar", len(df))
-with col2:
-    status = "🟢 Faol" if any(t.name == "BotThread" for t in threading.enumerate()) else "🔴 To'xtagan"
-    st.metric("⚙️ Bot Statusi", status)
-with col3:
-    st.metric("🕒 Server Vaqti", datetime.now().strftime("%H:%M"))
+c1, c2, c3 = st.columns(3)
+with c1: st.metric("👥 Foydalanuvchilar", len(df))
+with c2: 
+    bot_alive = any(t.name == "BotThread" for t in threading.enumerate())
+    st.metric("🤖 Bot Statusi", "🟢 Faol" if bot_alive else "🔴 Kutishda")
+with c3: st.metric("📅 Bugun", datetime.now().strftime("%d-%m-%Y"))
 
-# Tablar
-tab1, tab2 = st.tabs(["📢 Reklama Yuborish", "📋 Foydalanuvchilar Ro'yxati"])
+tab1, tab2 = st.tabs(["📢 Xabar Tarqatish", "📋 Ma'lumotlar Bazasi"])
 
-# 1-TAB: Xabar yuborish (Broadcast)
-# 1-TAB: Xabar yuborish (Broadcast)
 with tab1:
-    st.subheader("Hammaga xabar yuborish")
-    broadcast_text = st.text_area("Xabar matnini kiriting:", height=100)
+    st.subheader("Barcha foydalanuvchilarga xabar yuborish")
+    msg_text = st.text_area("Xabar matni:", placeholder="Salom...")
     
-    if st.button("🚀 Xabarni Yuborish"):
+    if st.button("Yuborishni boshlash"):
         if df.empty:
-            st.warning("Foydalanuvchilar yo'q!")
-        elif not broadcast_text:
+            st.error("Bazada foydalanuvchilar yo'q!")
+        elif not msg_text:
             st.warning("Xabar matni bo'sh!")
         else:
-            # Progress bar va foydalanuvchilar ro'yxati
-            user_ids = df['user_id'].tolist()
-            progress_bar = st.progress(0, text="Yuborish boshlandi...")
+            ids = df['user_id'].tolist()
+            prog = st.progress(0, text="Tayyorlanmoqda...")
+            s_count, f_count = 0, 0
             
-            # Broadcast funksiyasini ichida hisoblaymiz va return qilamiz
-            async def send_broadcast():
-                s_count = 0 # success
-                f_count = 0 # fail
+            # Broadcast uchun alohida vaqtinchalik loop
+            async def broadcast():
+                nonlocal s_count, f_count
                 temp_bot = Bot(token=BOT_TOKEN)
-                
-                for i, user_id in enumerate(user_ids):
+                for i, uid in enumerate(ids):
                     try:
-                        await temp_bot.send_message(chat_id=user_id, text=broadcast_text)
+                        await temp_bot.send_message(uid, msg_text, parse_mode="HTML")
                         s_count += 1
                     except:
                         f_count += 1
-                    
-                    # Progress barni yangilash
-                    percent = (i + 1) / len(user_ids)
-                    progress_bar.progress(percent, text=f"Yuborilmoqda... {i+1}/{len(user_ids)}")
-                
+                    prog.progress((i + 1) / len(ids), text=f"Yuborilmoqda: {i+1}/{len(ids)}")
                 await temp_bot.session.close()
-                return s_count, f_count
 
-            # Funksiyani ishga tushirib, natijani olamiz
-            success_count, fail_count = asyncio.run(send_broadcast())
-            
-            progress_bar.progress(1.0, text="Yakunlandi!")
-            st.success(f"✅ Natija:\n- Yuborildi: {success_count} ta\n- Yetib bormadi (blok): {fail_count} ta")
-    
-# 2-TAB: Jadval
+            asyncio.run(broadcast())
+            st.success(f"✅ Tugadi! Yetkazildi: {s_count}, Bloklangan: {f_count}")
+
 with tab2:
-    st.subheader("Barcha foydalanuvchilar")
+    st.subheader("Foydalanuvchilar jadvali")
     if not df.empty:
         st.dataframe(df, use_container_width=True)
+        st.download_button("Excel yuklab olish", df.to_csv(index=False), "users.csv", "text/csv")
     else:
-        st.info("Hozircha foydalanuvchilar yo'q.")
+        st.info("Baza bo'sh.")
 
+st.sidebar.markdown(f"**Admin ID:** `{ADMIN_ID}`")
+if st.sidebar.button("🔄 Sahifani yangilash"):
+    st.rerun()
