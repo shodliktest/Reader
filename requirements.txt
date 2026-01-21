@@ -3,9 +3,10 @@ pyTelegramBotAPI
 aiogram
 openai-whisper
 groq
-yt-dlp
+yt-dlp>=2025.01.15
 torch
 pandas
 pytz
 deep-translator
 setuptools
+
