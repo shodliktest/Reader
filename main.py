@@ -209,6 +209,7 @@ with col3:
 tab1, tab2 = st.tabs(["📢 Reklama Yuborish", "📋 Foydalanuvchilar Ro'yxati"])
 
 # 1-TAB: Xabar yuborish (Broadcast)
+# 1-TAB: Xabar yuborish (Broadcast)
 with tab1:
     st.subheader("Hammaga xabar yuborish")
     broadcast_text = st.text_area("Xabar matnini kiriting:", height=100)
@@ -219,36 +220,36 @@ with tab1:
         elif not broadcast_text:
             st.warning("Xabar matni bo'sh!")
         else:
-            # PROGRESS BAR SOZLAMALARI
+            # Progress bar va foydalanuvchilar ro'yxati
             user_ids = df['user_id'].tolist()
             progress_bar = st.progress(0, text="Yuborish boshlandi...")
-            success_count = 0
-            fail_count = 0
             
-            # Broadcast funksiyasi
+            # Broadcast funksiyasini ichida hisoblaymiz va return qilamiz
             async def send_broadcast():
-                nonlocal success_count, fail_count
+                s_count = 0 # success
+                f_count = 0 # fail
                 temp_bot = Bot(token=BOT_TOKEN)
                 
                 for i, user_id in enumerate(user_ids):
                     try:
                         await temp_bot.send_message(chat_id=user_id, text=broadcast_text)
-                        success_count += 1
+                        s_count += 1
                     except:
-                        fail_count += 1 # Bloklagan bo'lsa
+                        f_count += 1
                     
                     # Progress barni yangilash
                     percent = (i + 1) / len(user_ids)
                     progress_bar.progress(percent, text=f"Yuborilmoqda... {i+1}/{len(user_ids)}")
                 
                 await temp_bot.session.close()
+                return s_count, f_count
 
-            # Ishga tushirish
-            asyncio.run(send_broadcast())
+            # Funksiyani ishga tushirib, natijani olamiz
+            success_count, fail_count = asyncio.run(send_broadcast())
             
             progress_bar.progress(1.0, text="Yakunlandi!")
             st.success(f"✅ Natija:\n- Yuborildi: {success_count} ta\n- Yetib bormadi (blok): {fail_count} ta")
-
+    
 # 2-TAB: Jadval
 with tab2:
     st.subheader("Barcha foydalanuvchilar")
@@ -256,3 +257,4 @@ with tab2:
         st.dataframe(df, use_container_width=True)
     else:
         st.info("Hozircha foydalanuvchilar yo'q.")
+
