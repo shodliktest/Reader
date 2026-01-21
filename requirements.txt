@@ -1,6 +1,11 @@
 streamlit
-aiogram==3.3.0
+pyTelegramBotAPI
+aiogram
+openai-whisper
+groq
 yt-dlp
-watchdog
-pytz
+torch
 pandas
+pytz
+deep-translator
+setuptools
