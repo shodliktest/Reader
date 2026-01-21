@@ -1,2 +1,6 @@
-aiogram
+streamlit
+aiogram==3.3.0
 yt-dlp
+watchdog
+pytz
+pandas
