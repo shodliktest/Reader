@@ -31,9 +31,19 @@ foydalanuvchiga qaytarib yuborish uchun, hamda botning o'zini ishga tushirish uc
 """
 
 import os
+import sys
 import io
 import requests
 import streamlit as st
+
+# MUHIM: xuddi bot.py'dagi kabi - bu faylning o'zi joylashgan papka har doim
+# sys.path'da bo'lishini ta'minlaymiz, aks holda "import bot", "import
+# session_store" kabi lokal modullarni topishda muammo chiqishi mumkin
+# (ba'zi hosting muhitlarida, masalan Streamlit Cloud'ning uv-asosli
+# ishga tushirish jarayonida).
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
 
 import session_store
 from docx_builder import build_docx

@@ -29,11 +29,23 @@ MUHIM SOZLASH:
 """
 
 import os
+import sys
 import io
 import asyncio
 import logging
 import zipfile
 from datetime import datetime
+
+# MUHIM: bot.py Streamlit'ning fon-thread'i ichida ishga tushirilganda
+# (run_in_background() orqali), ba'zi hosting muhitlarida (masalan Streamlit
+# Cloud'ning uv-asosli ishga tushirish jarayoni) shu faylning o'zi joylashgan
+# papka sys.path'da bo'lmasligi mumkin - natijada "processor" va boshqa
+# lokal modullarni import qilishda ModuleNotFoundError chiqadi. Buni
+# oldini olish uchun o'z papkamizni qo'lda, aniq ravishda sys.path'ga
+# qo'shib qo'yamiz (agar allaqachon bo'lmasa).
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -45,6 +57,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 import session_store
+from processor import process_single_image
+from docx_builder import build_docx
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -239,7 +253,6 @@ async def _process_session_and_notify(session_id, chat_id):
     """Sessiyadagi barcha rasmlarni qayta ishlaydi va natijani xabar qiladi."""
     import base64
     from PIL import Image
-    from processor import process_single_image
 
     data = session_store.get_session(session_id)
     if data is None:
@@ -283,7 +296,6 @@ async def _process_session_and_notify(session_id, chat_id):
         await bot.send_message(chat_id, summary, reply_markup=kb)
     else:
         # WEBAPP_BASE_URL sozlanmagan bo'lsa - to'g'ridan-to'g'ri Word yaratib yuboramiz
-        from docx_builder import build_docx
         out_path = f"/tmp/{session_id}.docx"
         build_docx(questions, out_path, title=data.get("default_filename", "Test Savollari"))
         await bot.send_document(chat_id, FSInputFile(out_path, filename=f"{data.get('default_filename','natija')}.docx"))
