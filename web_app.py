@@ -55,6 +55,7 @@ if _THIS_DIR not in sys.path:
 
 import session_store
 from docx_builder import build_docx
+from processor import detect_photo_region
 
 # Streamlit Cloud'da API kalitlar "Secrets" bo'limida saqlanadi (st.secrets),
 # lekin bot.py va processor.py bularni oddiy os.environ orqali o'qiydi -
@@ -249,6 +250,18 @@ def main():
                 if use_image_key not in st.session_state:
                     st.session_state[use_image_key] = True
 
+                # Yakuniy (Word faylga tushadigan) rasm alohida saqlanadi.
+                # Bu birinchi marta ishga tushganda ORIGINAL rasmga teng bo'ladi
+                # va faqat foydalanuvchi "Kesish" tugmasini bossagina o'zgaradi -
+                # sichqonchani sudrab yurishning o'zi hech narsani kesib qo'ymaydi.
+                final_image_key = f"final_image_{i}"
+                if final_image_key not in st.session_state:
+                    st.session_state[final_image_key] = q["image_b64"]
+
+                crop_mode_key = f"crop_mode_{i}"
+                if crop_mode_key not in st.session_state:
+                    st.session_state[crop_mode_key] = False
+
                 st.checkbox(
                     "🖼️ Bu savolga rasm qo'shilsin (Word faylda)",
                     key=use_image_key,
@@ -257,44 +270,143 @@ def main():
                 if st.session_state[use_image_key]:
                     try:
                         orig_bytes = base64.b64decode(q["image_b64"])
-                        pil_img = Image.open(io.BytesIO(orig_bytes)).convert("RGB")
+                        orig_img = Image.open(io.BytesIO(orig_bytes)).convert("RGB")
 
-                        if _CROPPER_AVAILABLE:
-                            st.caption(
-                                "Kerak bo'lsa, rasmning faqat kerakli qismini "
-                                "tanlab kesib oling (chetlarni sudrab torting):"
-                            )
-                            cropped_img = st_cropper(
-                                pil_img,
-                                realtime_update=True,
-                                box_color="#FF4B4B",
-                                aspect_ratio=None,
-                                key=f"cropper_{i}",
-                            )
-                            st.image(cropped_img, caption="Word faylga shu ko'rinishda tushadi", width=250)
-                            buf = io.BytesIO()
-                            cropped_img.convert("RGB").save(buf, format="JPEG", quality=90)
-                            final_image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                        current_final_bytes = base64.b64decode(st.session_state[final_image_key])
+                        is_cropped = st.session_state[final_image_key] != q["image_b64"]
+
+                        st.image(
+                            current_final_bytes,
+                            caption="Hozir Word faylga shu rasm tushadi"
+                            + (" (kesilgan)" if is_cropped else " (original)"),
+                            width=250,
+                        )
+
+                        # Kerakli (foto) qismini avtomatik aniqlashga harakat qilamiz -
+                        # topilsa, foydalanuvchi bitta tugma bosish bilan (cropper
+                        # oynasini ochmasdan) o'sha qismini qabul qilishi mumkin.
+                        auto_box_key = f"auto_box_{i}"
+                        if auto_box_key not in st.session_state:
+                            st.session_state[auto_box_key] = detect_photo_region(orig_img)
+                        auto_box = st.session_state[auto_box_key]
+
+                        if auto_box:
+                            col_auto_btn, col_crop_btn, col_reset_btn = st.columns(3)
                         else:
-                            # Zaxira variant: streamlit-cropper o'rnatilmagan bo'lsa,
-                            # slider orqali chekka-chegaralarni belgilab kesish
-                            st.caption(
-                                "⚠️ Aniqroq (sichqoncha bilan) kesish uchun "
-                                "`pip install streamlit-cropper` kerak. Hozircha "
-                                "slayder orqali kesish mumkin:"
-                            )
-                            w, h = pil_img.size
-                            left, right = st.slider(
-                                "Chap - o'ng chegara", 0, w, (0, w), key=f"cropx_{i}"
-                            )
-                            top, bottom = st.slider(
-                                "Yuqori - past chegara", 0, h, (0, h), key=f"cropy_{i}"
-                            )
-                            cropped_img = pil_img.crop((left, top, right, bottom))
-                            st.image(cropped_img, caption="Word faylga shu ko'rinishda tushadi", width=250)
-                            buf = io.BytesIO()
-                            cropped_img.save(buf, format="JPEG", quality=90)
-                            final_image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                            col_auto_btn = None
+                            col_crop_btn, col_reset_btn = st.columns(2)
+
+                        if auto_box:
+                            with col_auto_btn:
+                                if st.button("✨ Avtomatik kesish", key=f"auto_crop_{i}"):
+                                    ax0, ay0, ax1, ay1 = auto_box
+                                    auto_cropped = orig_img.crop((ax0, ay0, ax1, ay1))
+                                    buf = io.BytesIO()
+                                    auto_cropped.convert("RGB").save(buf, format="JPEG", quality=90)
+                                    st.session_state[final_image_key] = base64.b64encode(buf.getvalue()).decode("ascii")
+                                    st.session_state[crop_mode_key] = False
+                                    st.rerun()
+                        with col_crop_btn:
+                            if st.button("✂️ Qo'lda kesish", key=f"open_crop_{i}"):
+                                st.session_state[crop_mode_key] = True
+                        with col_reset_btn:
+                            if is_cropped and st.button("↩️ Original", key=f"reset_crop_{i}"):
+                                st.session_state[final_image_key] = q["image_b64"]
+                                st.session_state[crop_mode_key] = False
+                                st.rerun()
+
+                        if st.session_state[crop_mode_key]:
+                            # auto_box yuqorida allaqachon hisoblangan
+                            if auto_box:
+                                st.caption(
+                                    "✨ Kerakli qism avtomatik aniqlandi (pastda ko'k "
+                                    "chegara bilan belgilangan). Kerak bo'lsa chegarani "
+                                    "qo'lda sudrab tuzating, so'ng 'Shu ko'rinishda "
+                                    "saqlash' tugmasini bosing:"
+                                )
+                            else:
+                                st.caption(
+                                    "Kerakli qismini chegaralarni sudrab tanlang, "
+                                    "keyin pastdagi 'Shu ko'rinishda saqlash' tugmasini bosing:"
+                                )
+
+                            if _CROPPER_AVAILABLE:
+                                default_coords = None
+                                if auto_box:
+                                    ax0, ay0, ax1, ay1 = auto_box
+                                    # streamlit-cropper eski/yangi versiyalarida
+                                    # default_coords format tartibi farq qilishi
+                                    # mumkin - shuning uchun xato chiqsa,
+                                    # parametrsiz (butun rasm) holatga qaytamiz.
+                                    default_coords = (ax0, ax1, ay0, ay1)
+
+                                try:
+                                    preview_crop = st_cropper(
+                                        orig_img,
+                                        realtime_update=True,
+                                        box_color="#FF4B4B",
+                                        aspect_ratio=None,
+                                        return_type="box",
+                                        default_coords=default_coords,
+                                        key=f"cropper_{i}",
+                                    )
+                                except Exception:
+                                    preview_crop = st_cropper(
+                                        orig_img,
+                                        realtime_update=True,
+                                        box_color="#FF4B4B",
+                                        aspect_ratio=None,
+                                        return_type="box",
+                                        key=f"cropper_{i}",
+                                    )
+                                # streamlit-cropper "box" qiymatlarini ORIGINAL rasm
+                                # o'lchamiga moslab (ekranga moslab kichraytirilgan
+                                # bo'lsa ham) avtomatik qaytaradi, shuning uchun
+                                # qo'shimcha masshtablash shart emas.
+                                left = preview_crop["left"]
+                                top = preview_crop["top"]
+                                right = left + preview_crop["width"]
+                                bottom = top + preview_crop["height"]
+                                preview_img = orig_img.crop((left, top, right, bottom))
+                            else:
+                                # Zaxira variant: streamlit-cropper o'rnatilmagan bo'lsa,
+                                # slayder orqali chegara belgilab kesish. Slayderlarning
+                                # boshlang'ich qiymati ham avtomatik aniqlangan hududga
+                                # o'rnatiladi (topilgan bo'lsa).
+                                st.caption(
+                                    "⚠️ Aniqroq (sichqoncha bilan) kesish uchun "
+                                    "`pip install streamlit-cropper` kerak. Hozircha "
+                                    "slayder orqali kesish mumkin:"
+                                )
+                                w, h = orig_img.size
+                                if auto_box:
+                                    ax0, ay0, ax1, ay1 = auto_box
+                                else:
+                                    ax0, ay0, ax1, ay1 = 0, 0, w, h
+                                left, right = st.slider(
+                                    "Chap - o'ng chegara", 0, w, (ax0, ax1), key=f"cropx_{i}"
+                                )
+                                top, bottom = st.slider(
+                                    "Yuqori - past chegara", 0, h, (ay0, ay1), key=f"cropy_{i}"
+                                )
+                                preview_img = orig_img.crop((left, top, right, bottom))
+
+                            st.image(preview_img, caption="Kesish natijasi (hali saqlanmagan)", width=250)
+
+                            col_save_btn, col_cancel_btn = st.columns(2)
+                            with col_save_btn:
+                                if st.button("✅ Shu ko'rinishda saqlash", key=f"save_crop_{i}", type="primary"):
+                                    buf = io.BytesIO()
+                                    preview_img.convert("RGB").save(buf, format="JPEG", quality=90)
+                                    st.session_state[final_image_key] = base64.b64encode(buf.getvalue()).decode("ascii")
+                                    st.session_state[crop_mode_key] = False
+                                    st.rerun()
+                            with col_cancel_btn:
+                                if st.button("❌ Bekor qilish", key=f"cancel_crop_{i}"):
+                                    st.session_state[crop_mode_key] = False
+                                    st.rerun()
+
+                        final_image_b64 = st.session_state[final_image_key]
                     except Exception as e:
                         st.warning(f"Rasmni ko'rsatishda xatolik: {e}")
                         final_image_b64 = q.get("image_b64")

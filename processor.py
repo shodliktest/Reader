@@ -229,6 +229,97 @@ def check_tesseract_available():
         return False
 
 
+# --- Rasmning "chinakam foto" qismini avtomatik topish ---
+#
+# Ko'p test-ilovalari (masalan YHQ testlari) savol rasmini aniq rangli
+# (odatda ko'k) ramka bilan o'rab, ramka ichida yuqorida savol matnini oq
+# fonda, pastida esa chinakam fotosuratni ko'rsatadi. Bu funksiya avval
+# ramkani (eng katta rangli to'rtburchak konturni) topadi, keyin ramka
+# ichida qatorlar bo'yicha rang to'yinganligini (saturation) tekshirib,
+# oq/matn qismi bilan rangli foto qismini bir-biridan ajratadi.
+#
+# Natija: (left, top, right, bottom) piksel koordinatalari, yoki hech narsa
+# topilmasa None - bunda chaqiruvchi kod butun rasmni ishlatishi kerak.
+
+BORDER_COLOR_RANGES_HSV = [
+    # (h_min, h_max, s_min, v_min) - ko'k ramka (eng ko'p uchraydigan holat)
+    (95, 125, 90, 90),
+    # och-ko'k / moviy variant
+    (85, 100, 60, 120),
+]
+
+PHOTO_SATURATION_THRESHOLD = 15
+
+
+def detect_photo_region(pil_img):
+    """Rasmdan rangli ramka bilan o'ralgan "chinakam foto" qismini avtomatik
+    topishga harakat qiladi. Muvaffaqiyatli bo'lsa (left, top, right, bottom)
+    qaytaradi, aks holda None."""
+    try:
+        arr = np.array(pil_img.convert('RGB'))
+        h_img, w_img = arr.shape[:2]
+        if h_img < 50 or w_img < 50:
+            return None
+
+        hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+        hh, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+
+        best_box = None
+        best_area = 0
+
+        for h_min, h_max, s_min, v_min in BORDER_COLOR_RANGES_HSV:
+            mask = ((hh > h_min) & (hh < h_max) & (s > s_min) & (v > v_min)).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours:
+                x, y, w, ht = cv2.boundingRect(c)
+                area = w * ht
+                # Ramka deb hisoblanishi uchun: ekranning kamida yarmicha keng,
+                # va yetarlicha baland bo'lishi kerak (nozik chiziqlar, tugmalar
+                # va h.k. chiqarib tashlanadi)
+                if w < w_img * 0.5 or ht < 100:
+                    continue
+                if area > best_area:
+                    best_area = area
+                    best_box = (x, y, w, ht)
+
+        if best_box is None:
+            return None
+
+        x, y, w, ht = best_box
+        pad = max(4, int(min(w, ht) * 0.01))
+        inner_x0 = x + pad
+        inner_y0 = y + pad
+        inner_x1 = min(x + w - pad, w_img)
+        inner_y1 = min(y + ht - pad, h_img)
+        if inner_x1 <= inner_x0 or inner_y1 <= inner_y0:
+            return None
+
+        inner = arr[inner_y0:inner_y1, inner_x0:inner_x1]
+        inner_hsv = cv2.cvtColor(inner, cv2.COLOR_RGB2HSV)
+        inner_sat = inner_hsv[..., 1]
+        row_sat = inner_sat.mean(axis=1)
+
+        content_rows = np.where(row_sat > PHOTO_SATURATION_THRESHOLD)[0]
+        if len(content_rows) == 0:
+            # To'yinganlik past (masalan qora-oq chizma/diagramma) - butun
+            # ramka ichini "foto" deb hisoblaymiz
+            return (inner_x0, inner_y0, inner_x1, inner_y1)
+
+        top_offset = int(content_rows[0])
+        bottom_offset = int(content_rows[-1])
+
+        final_y0 = inner_y0 + top_offset
+        final_y1 = inner_y0 + bottom_offset
+
+        # Juda kichik natija chiqsa (masalan xato-detekt) - ishonchsiz deb hisoblaymiz
+        if final_y1 - final_y0 < 60:
+            return (inner_x0, inner_y0, inner_x1, inner_y1)
+
+        return (inner_x0, final_y0, inner_x1, final_y1)
+    except Exception:
+        return None
+
+
 NOISE_PATTERNS = [
     'yakunlash', 'savol', 'ovozli tushuntirish', 'tushuntirishlar',
     'izohlarni ochish', 'tarif sotib', 'sotib oling', 'kb/s', 'kb / s',
