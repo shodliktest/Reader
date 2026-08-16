@@ -1,0 +1,9 @@
+pytesseract
+numpy
+opencv-python
+Pillow
+python-docx
+groq
+aiogram>=3.0
+streamlit
+requests
