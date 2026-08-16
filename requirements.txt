@@ -1,6 +1,6 @@
 pytesseract
 numpy
-opencv-python
+opencv-python-headless
 Pillow
 python-docx
 groq

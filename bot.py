@@ -357,6 +357,26 @@ def run_in_background():
         logger.error("BOT_TOKEN yo'q - bot ishga tushirilmadi")
         return None
 
+    # Eskirib qolgan lock faylni tozalash: agar lock faylda yozilgan PID
+    # endi tizimda ishlamayotgan bo'lsa (masalan Streamlit Cloud oldingi
+    # jarayonni kutilmagan tarzda o'chirgan bo'lsa - "finally" bloki
+    # ishlamay qolgan holat), bu eski lock faylni avtomatik o'chiramiz.
+    # Aks holda bot QAYTA HECH QACHON ishga tushmay qoladi (doimiy
+    # "Conflict" holatiga o'xshab ko'rinadi, aslida faqat eski lock qoldig'i).
+    if os.path.exists(_BOT_LOCK_FILE):
+        try:
+            with open(_BOT_LOCK_FILE, "r") as f:
+                old_pid = int((f.read() or "0").strip())
+            if old_pid and old_pid != os.getpid():
+                try:
+                    os.kill(old_pid, 0)  # jarayon hali tirikmi - signal yubormaydi, faqat tekshiradi
+                except OSError:
+                    # Jarayon o'lik - eski lock qoldiq, xavfsiz o'chiramiz
+                    os.unlink(_BOT_LOCK_FILE)
+                    logger.info("Eskirgan bot lock fayli tozalandi (egasi jarayon endi yo'q)")
+        except Exception:
+            pass
+
     try:
         lock_fd = open(_BOT_LOCK_FILE, "w")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
