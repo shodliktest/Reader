@@ -7,3 +7,4 @@ groq
 aiogram>=3.0
 streamlit
 requests
+streamlit-cropper

@@ -33,8 +33,16 @@ foydalanuvchiga qaytarib yuborish uchun, hamda botning o'zini ishga tushirish uc
 import os
 import sys
 import io
+import base64
 import requests
 import streamlit as st
+from PIL import Image
+
+try:
+    from streamlit_cropper import st_cropper
+    _CROPPER_AVAILABLE = True
+except ImportError:
+    _CROPPER_AVAILABLE = False
 
 # MUHIM: xuddi bot.py'dagi kabi - bu faylning o'zi joylashgan papka har doim
 # sys.path'da bo'lishini ta'minlaymiz, aks holda "import bot", "import
@@ -160,7 +168,68 @@ def main():
 
     st.divider()
 
-    # Har bir savolni tahrirlash uchun forma
+    # Har bir savol uchun variantlar ro'yxati session_state'da saqlanadi -
+    # shunda "o'chirish" tugmasi bosilganda ro'yxat qayta tartiblanadi
+    # (A, B, C, D tartibi hech qachon buzilmaydi - kim o'chirilsa, pastdagilar
+    # yuqoriga ko'tariladi) va Streamlit qayta chizilganda yo'qolib qolmaydi.
+    for i, q in enumerate(questions):
+        opts_key = f"opts_{i}"
+        if opts_key not in st.session_state:
+            # Bo'sh (yoki faqat probel) variantlarni avtomatik olib tashlaymiz -
+            # OCR ba'zan "D)" kabi bo'sh quti chiqarib qo'yishi mumkin, foydalanuvchi
+            # har safar qo'lda o'chirib o'tirmasin.
+            raw_opts = q.get("options", [])
+            non_empty_opts = [o for o in raw_opts if o and o.strip()]
+            st.session_state[opts_key] = non_empty_opts
+        correct_key = f"correct_{i}"
+        if correct_key not in st.session_state:
+            ci = q.get("correct_index")
+            # correct_index ham bo'sh variantlar olib tashlangandan keyingi
+            # yangi ro'yxatga mos ravishda qayta hisoblanadi
+            raw_opts = q.get("options", [])
+            if ci is not None and 0 <= ci < len(raw_opts):
+                removed_before = sum(
+                    1 for o in raw_opts[:ci] if not (o and o.strip())
+                )
+                ci = ci - removed_before if raw_opts[ci] and raw_opts[ci].strip() else 0
+            st.session_state[correct_key] = ci if ci is not None else 0
+
+    def _remove_option(q_index, opt_index):
+        opts_key = f"opts_{q_index}"
+        correct_key = f"correct_{q_index}"
+        opts = st.session_state[opts_key]
+        # Har bir variantning joriy matnini widget'lardan (agar foydalanuvchi
+        # tahrirlagan bo'lsa) o'qib olamiz, keyin o'chiriladigan indexni tashlaymiz
+        current_texts = [
+            st.session_state.get(f"opt_{q_index}_{j}", opts[j]) for j in range(len(opts))
+        ]
+        old_correct = st.session_state.get(correct_key, 0)
+
+        del current_texts[opt_index]
+
+        # To'g'ri javob indexini yangi ro'yxatga moslab qayta hisoblaymiz
+        if opt_index < old_correct:
+            new_correct = old_correct - 1
+        elif opt_index == old_correct:
+            new_correct = 0
+        else:
+            new_correct = old_correct
+
+        st.session_state[opts_key] = current_texts
+        # Eski text_input key'larini tozalaymiz, aks holda Streamlit eski
+        # qiymatlarni indexlar siljigandan keyin ham ko'rsatib qo'yishi mumkin
+        for j in range(len(opts)):
+            st.session_state.pop(f"opt_{q_index}_{j}", None)
+        st.session_state[correct_key] = min(new_correct, max(len(current_texts) - 1, 0))
+
+    def _add_option(q_index):
+        opts_key = f"opts_{q_index}"
+        current_texts = [
+            st.session_state.get(f"opt_{q_index}_{j}", opts) for j, opts in enumerate(st.session_state[opts_key])
+        ]
+        current_texts.append("")
+        st.session_state[opts_key] = current_texts
+
     edited_questions = []
     for i, q in enumerate(questions):
         with st.expander(
@@ -171,35 +240,111 @@ def main():
             if q.get("error"):
                 st.warning(f"OCR ogohlantirishi: {q['error']}")
 
+            # --- Rasm bilan ishlash: yoqish/o'chirish + kerakli qismini kesish ---
+            use_image_key = f"use_image_{i}"
+            crop_box_key = f"crop_box_{i}"
+            final_image_b64 = None
+
             if q.get("image_b64"):
-                try:
-                    import base64 as _b64
-                    st.image(_b64.b64decode(q["image_b64"]), caption="Asl rasm", width=250)
-                except Exception:
-                    pass
+                if use_image_key not in st.session_state:
+                    st.session_state[use_image_key] = True
+
+                st.checkbox(
+                    "🖼️ Bu savolga rasm qo'shilsin (Word faylda)",
+                    key=use_image_key,
+                )
+
+                if st.session_state[use_image_key]:
+                    try:
+                        orig_bytes = base64.b64decode(q["image_b64"])
+                        pil_img = Image.open(io.BytesIO(orig_bytes)).convert("RGB")
+
+                        if _CROPPER_AVAILABLE:
+                            st.caption(
+                                "Kerak bo'lsa, rasmning faqat kerakli qismini "
+                                "tanlab kesib oling (chetlarni sudrab torting):"
+                            )
+                            cropped_img = st_cropper(
+                                pil_img,
+                                realtime_update=True,
+                                box_color="#FF4B4B",
+                                aspect_ratio=None,
+                                key=f"cropper_{i}",
+                            )
+                            st.image(cropped_img, caption="Word faylga shu ko'rinishda tushadi", width=250)
+                            buf = io.BytesIO()
+                            cropped_img.convert("RGB").save(buf, format="JPEG", quality=90)
+                            final_image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                        else:
+                            # Zaxira variant: streamlit-cropper o'rnatilmagan bo'lsa,
+                            # slider orqali chekka-chegaralarni belgilab kesish
+                            st.caption(
+                                "⚠️ Aniqroq (sichqoncha bilan) kesish uchun "
+                                "`pip install streamlit-cropper` kerak. Hozircha "
+                                "slayder orqali kesish mumkin:"
+                            )
+                            w, h = pil_img.size
+                            left, right = st.slider(
+                                "Chap - o'ng chegara", 0, w, (0, w), key=f"cropx_{i}"
+                            )
+                            top, bottom = st.slider(
+                                "Yuqori - past chegara", 0, h, (0, h), key=f"cropy_{i}"
+                            )
+                            cropped_img = pil_img.crop((left, top, right, bottom))
+                            st.image(cropped_img, caption="Word faylga shu ko'rinishda tushadi", width=250)
+                            buf = io.BytesIO()
+                            cropped_img.save(buf, format="JPEG", quality=90)
+                            final_image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                    except Exception as e:
+                        st.warning(f"Rasmni ko'rsatishda xatolik: {e}")
+                        final_image_b64 = q.get("image_b64")
+                else:
+                    st.caption("🚫 Bu savol uchun rasm Word faylga qo'shilmaydi.")
 
             question_text = st.text_area(
                 "Savol matni", value=q.get("question", ""), key=f"q_{i}", height=80,
             )
 
-            options = q.get("options", [])
-            edited_options = []
-            for j, opt in enumerate(options):
-                edited_options.append(
-                    st.text_input(f"Variant {chr(65 + j)}", value=opt, key=f"opt_{i}_{j}")
-                )
+            opts_key = f"opts_{i}"
+            correct_key = f"correct_{i}"
+            current_options = st.session_state[opts_key]
 
-            correct_index = q.get("correct_index")
+            edited_options = []
+            for j in range(len(current_options)):
+                col_opt, col_del = st.columns([6, 1])
+                with col_opt:
+                    val = st.text_input(
+                        f"Variant {chr(65 + j)}",
+                        value=current_options[j],
+                        key=f"opt_{i}_{j}",
+                    )
+                    edited_options.append(val)
+                with col_del:
+                    st.write("")  # tugmani matn maydoni bilan tekislash uchun bo'sh joy
+                    st.button(
+                        "🗑️", key=f"del_{i}_{j}",
+                        help=f"{chr(65 + j)} variantni o'chirish",
+                        on_click=_remove_option, args=(i, j),
+                    )
+
+            st.button(
+                "➕ Yangi variant qo'shish", key=f"add_{i}",
+                on_click=_add_option, args=(i,),
+            )
+
             if edited_options:
                 option_labels = [f"{chr(65 + j)}) {t[:40]}" for j, t in enumerate(edited_options)]
-                default_idx = correct_index if correct_index is not None and correct_index < len(edited_options) else 0
+                default_idx = st.session_state[correct_key]
+                if default_idx >= len(edited_options):
+                    default_idx = 0
                 chosen = st.radio(
                     "To'g'ri javob",
                     options=list(range(len(edited_options))),
                     format_func=lambda idx: option_labels[idx],
                     index=default_idx,
-                    key=f"correct_{i}",
+                    key=f"correct_radio_{i}",
                 )
+                st.session_state[correct_key] = chosen
             else:
                 chosen = None
 
@@ -207,8 +352,9 @@ def main():
                 "question": question_text,
                 "options": edited_options,
                 "correct_index": chosen,
-                # Asl rasm - Word faylga o'sha savoldan oldin qo'shiladi
-                "image_b64": q.get("image_b64"),
+                # Foydalanuvchi tanlagan/kesgan yakuniy rasm (yoki checkbox
+                # o'chirilgan bo'lsa - None, ya'ni Word faylga rasm qo'shilmaydi)
+                "image_b64": final_image_b64,
             })
 
     st.divider()

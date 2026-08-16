@@ -354,6 +354,13 @@ def process_single_image(pil_img, use_groq=True):
                 groq_option = groq_clean_option(option_text)
                 final_option = groq_option or option_text
 
+            # Groq tozalashdan keyin ham (yoki asl OCR natijasi) bo'sh bo'lib
+            # qolgan bo'lishi mumkin - bunday "bo'sh variant"larni umuman
+            # ro'yxatga qo'shmaymiz (Word faylda keraksiz bo'sh D) kabi
+            # qatorlar chiqib qolmasligi uchun).
+            if not final_option.strip():
+                continue
+
             options.append(final_option)
             if is_green:
                 correct_index = len(options) - 1
