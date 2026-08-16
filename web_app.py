@@ -171,6 +171,13 @@ def main():
             if q.get("error"):
                 st.warning(f"OCR ogohlantirishi: {q['error']}")
 
+            if q.get("image_b64"):
+                try:
+                    import base64 as _b64
+                    st.image(_b64.b64decode(q["image_b64"]), caption="Asl rasm", width=250)
+                except Exception:
+                    pass
+
             question_text = st.text_area(
                 "Savol matni", value=q.get("question", ""), key=f"q_{i}", height=80,
             )
@@ -200,6 +207,8 @@ def main():
                 "question": question_text,
                 "options": edited_options,
                 "correct_index": chosen,
+                # Asl rasm - Word faylga o'sha savoldan oldin qo'shiladi
+                "image_b64": q.get("image_b64"),
             })
 
     st.divider()

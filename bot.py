@@ -272,6 +272,9 @@ async def _process_session_and_notify(session_id, chat_id):
             "correct_index": result.get("correct_index"),
             "success": result.get("success", False),
             "error": result.get("error"),
+            # Asl rasmni ham saqlab qolamiz - Word faylga shu rasm ham
+            # qo'shiladi (savol matnidan oldin, namunadagi kabi).
+            "image_b64": img_entry["b64"],
         })
 
         # Har 5 ta rasmda bir marta progress xabarini yangilaymiz (juda tez-tez
