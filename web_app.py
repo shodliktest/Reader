@@ -73,6 +73,78 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 
 st.set_page_config(page_title="Test natijalarini tekshirish", layout="centered")
 
+# --- "edit.html" (TestPro) uslubidagi karta-asosli dizayn -----------------
+# Bu faqat vizual qatlam - pastdagi mantiq (session_state) hech narsani
+# yo'qotmasligi uchun alohida ishlab chiqilgan (pastga qarang).
+_CARD_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Unbounded:wght@700;800;900&display=swap');
+
+:root {
+  --tp-accent: #4F46E5;
+  --tp-accent-glow: rgba(79,70,229,0.15);
+  --tp-green: #059669;
+  --tp-red: #E11D48;
+  --tp-border: rgba(148,163,184,0.25);
+  --tp-bg-2: rgba(148,163,184,0.06);
+}
+
+html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
+
+/* Savol kartasi */
+.tp-card {
+  border: 1.5px solid var(--tp-border);
+  border-radius: 16px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  background: var(--tp-bg-2);
+}
+.tp-card-hdr {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .55rem .9rem;
+  background: rgba(148,163,184,0.10);
+  border-bottom: 1px solid var(--tp-border);
+  font-family: 'Unbounded', sans-serif;
+  font-size: .68rem; font-weight: 800;
+  color: var(--tp-accent);
+}
+.tp-card-hdr .tp-warn { margin-left: auto; color: #D97706; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: .72rem; }
+.tp-card-body { padding: .85rem .9rem 1rem; }
+
+/* To'g'ri javob belgisi ustidagi label */
+.tp-opt-lbl {
+  font-family: 'Unbounded', sans-serif; font-weight: 800; font-size: .78rem;
+}
+
+/* Streamlit radio -> variant tanlagichni "chip" ko'rinishiga yaqinlashtiramiz */
+div[data-testid="stRadio"] > div { gap: .35rem; }
+div[data-testid="stRadio"] label {
+  border: 1.5px solid var(--tp-border);
+  border-radius: 10px;
+  padding: .4rem .65rem;
+  margin-bottom: .3rem;
+  width: 100%;
+  transition: all .15s ease;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+  border-color: rgba(16,185,129,0.5);
+  background: rgba(16,185,129,0.08);
+}
+
+.tp-badge {
+  display: inline-block; font-size: .72rem; font-weight: 700;
+  padding: .2rem .6rem; border-radius: 99px;
+  border: 1px solid var(--tp-border); color: #64748B;
+  margin-right: .4rem;
+}
+.tp-badge.ok { border-color: rgba(16,185,129,0.35); color: var(--tp-green); background: rgba(16,185,129,0.08); }
+.tp-badge.warn { border-color: rgba(245,158,11,0.35); color: #D97706; background: rgba(245,158,11,0.08); }
+
+hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
+</style>
+"""
+st.markdown(_CARD_CSS, unsafe_allow_html=True)
+
 
 # --- Botni fon-thread sifatida BIR MARTA ishga tushirish ---
 #
@@ -233,11 +305,25 @@ def main():
 
     edited_questions = []
     for i, q in enumerate(questions):
-        with st.expander(
-            f"{i + 1}). {q['question'][:60]}{'...' if len(q['question']) > 60 else ''}"
-            + ("" if q.get("success") else "  ⚠️ Tekshiring"),
-            expanded=not q.get("success", True),
-        ):
+        # "edit.html" uslubidagi doim-ochiq karta: st.expander o'rniga -
+        # chunki expander holati (ochiq/yopiq) foydalanuvchi bosgan joyni
+        # keyingi rerun'da eslab qololmaydi va tasodifan yopilib qoladi.
+        # st.container(border=True) esa hech qachon o'z-o'zidan yopilmaydi -
+        # karta har doim ochiq turadi, hech narsa yo'qolmaydi.
+        num_label = f"{i + 1}-savol"
+        card = st.container(border=True)
+        with card:
+            hdr_col1, hdr_col2 = st.columns([5, 2])
+            with hdr_col1:
+                st.markdown(
+                    f'<span class="tp-badge">{num_label}</span>', unsafe_allow_html=True
+                )
+            with hdr_col2:
+                if not q.get("success", True):
+                    st.markdown(
+                        '<span class="tp-badge warn">⚠️ Tekshiring</span>',
+                        unsafe_allow_html=True,
+                    )
             if q.get("error"):
                 st.warning(f"OCR ogohlantirishi: {q['error']}")
 
@@ -421,44 +507,62 @@ def main():
             correct_key = f"correct_{i}"
             current_options = st.session_state[opts_key]
 
+            # "edit.html" uslubi: har bir variant o'z qatorida - chap tomonda
+            # A/B/C/D belgi-tugma (bosilsa o'sha variant TO'G'RI javob bo'ladi
+            # va yashil rangga o'tadi), o'rtada tahrirlanadigan matn, o'ngda
+            # o'chirish tugmasi. Hech qanday tugma bosish variantlarni
+            # "yopib" yoki tozalab qo'ymaydi - faqat session_state yangilanadi.
+            st.caption("To'g'ri javobni belgilash uchun harfni bosing:")
             edited_options = []
             for j in range(len(current_options)):
-                col_opt, col_del = st.columns([6, 1])
+                is_correct = (st.session_state[correct_key] == j)
+                col_lbl, col_opt, col_del = st.columns([1, 6, 1])
+                with col_lbl:
+                    lbl_type = "primary" if is_correct else "secondary"
+                    if st.button(
+                        ("✅ " if is_correct else "") + chr(65 + j),
+                        key=f"setok_{i}_{j}",
+                        type=lbl_type,
+                        use_container_width=True,
+                        help="To'g'ri javob sifatida belgilash",
+                    ):
+                        st.session_state[correct_key] = j
+                        st.rerun()
                 with col_opt:
                     val = st.text_input(
                         f"Variant {chr(65 + j)}",
                         value=current_options[j],
                         key=f"opt_{i}_{j}",
+                        label_visibility="collapsed",
+                        placeholder=f"Variant {chr(65 + j)}",
                     )
                     edited_options.append(val)
                 with col_del:
-                    st.write("")  # tugmani matn maydoni bilan tekislash uchun bo'sh joy
                     st.button(
                         "🗑️", key=f"del_{i}_{j}",
                         help=f"{chr(65 + j)} variantni o'chirish",
                         on_click=_remove_option, args=(i, j),
+                        disabled=len(current_options) <= 2,
+                        use_container_width=True,
+                    )
+                if is_correct:
+                    st.markdown(
+                        '<div style="margin:-.5rem 0 .5rem 2px">'
+                        '<span class="tp-badge ok">✓ To\'g\'ri javob</span></div>',
+                        unsafe_allow_html=True,
                     )
 
             st.button(
                 "➕ Yangi variant qo'shish", key=f"add_{i}",
                 on_click=_add_option, args=(i,),
+                use_container_width=True,
+                disabled=len(current_options) >= 8,
             )
 
-            if edited_options:
-                option_labels = [f"{chr(65 + j)}) {t[:40]}" for j, t in enumerate(edited_options)]
-                default_idx = st.session_state[correct_key]
-                if default_idx >= len(edited_options):
-                    default_idx = 0
-                chosen = st.radio(
-                    "To'g'ri javob",
-                    options=list(range(len(edited_options))),
-                    format_func=lambda idx: option_labels[idx],
-                    index=default_idx,
-                    key=f"correct_radio_{i}",
-                )
-                st.session_state[correct_key] = chosen
-            else:
-                chosen = None
+            chosen = st.session_state[correct_key] if edited_options else None
+            if chosen is not None and chosen >= len(edited_options):
+                chosen = 0
+                st.session_state[correct_key] = 0
 
             edited_questions.append({
                 "question": question_text,
