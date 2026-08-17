@@ -241,10 +241,20 @@ def main():
 
     st.divider()
 
-    # Har bir savol uchun variantlar ro'yxati session_state'da saqlanadi -
-    # shunda "o'chirish" tugmasi bosilganda ro'yxat qayta tartiblanadi
-    # (A, B, C, D tartibi hech qachon buzilmaydi - kim o'chirilsa, pastdagilar
-    # yuqoriga ko'tariladi) va Streamlit qayta chizilganda yo'qolib qolmaydi.
+    # Har bir savol uchun variantlar ro'yxati session_state'da saqlanadi.
+    #
+    # MUHIM TUZATISH: har bir variant endi index (0,1,2...) emas, balki
+    # BARQAROR, hech qachon o'zgarmaydigan ID (uuid) orqali kuzatiladi.
+    # Oldingi versiyada widget key'lari "opt_{savol}_{index}" edi - biror
+    # variant o'chirilganda pastdagilarning INDEXI siljib qolgani uchun,
+    # Streamlit ularni "xuddi shu key" deb hisoblab ESKI matnni ko'rsatib
+    # qo'yardi (go'yo variant o'zgarib/almashib ketgandek ko'rinardi).
+    # Endi har bir variant {"id": "...", "text": "..."} ko'rinishida
+    # saqlanadi va widget key'i shu barqaror id'ga bog'lanadi - shuning
+    # uchun o'chirish/qo'shish paytida boshqa variantlar hech qachon
+    # "sakrab" yoki almashib qolmaydi.
+    import uuid as _uuid
+
     for i, q in enumerate(questions):
         opts_key = f"opts_{i}"
         if opts_key not in st.session_state:
@@ -253,7 +263,9 @@ def main():
             # har safar qo'lda o'chirib o'tirmasin.
             raw_opts = q.get("options", [])
             non_empty_opts = [o for o in raw_opts if o and o.strip()]
-            st.session_state[opts_key] = non_empty_opts
+            st.session_state[opts_key] = [
+                {"id": _uuid.uuid4().hex[:8], "text": o} for o in non_empty_opts
+            ]
         correct_key = f"correct_{i}"
         if correct_key not in st.session_state:
             ci = q.get("correct_index")
@@ -265,43 +277,43 @@ def main():
                     1 for o in raw_opts[:ci] if not (o and o.strip())
                 )
                 ci = ci - removed_before if raw_opts[ci] and raw_opts[ci].strip() else 0
-            st.session_state[correct_key] = ci if ci is not None else 0
+            # correct_key endi variant ID'sini saqlaydi (index emas) -
+            # shunda variantlar tartibi o'zgarganda ham to'g'ri javob
+            # "adashib" qolmaydi.
+            opts_list = st.session_state[opts_key]
+            ci = ci if ci is not None else 0
+            st.session_state[correct_key] = (
+                opts_list[ci]["id"] if opts_list and 0 <= ci < len(opts_list) else None
+            )
 
-    def _remove_option(q_index, opt_index):
+    def _remove_option(q_index, opt_id):
         opts_key = f"opts_{q_index}"
         correct_key = f"correct_{q_index}"
-        opts = st.session_state[opts_key]
+        opts_list = st.session_state[opts_key]
+        if len(opts_list) <= 2:
+            return
         # Har bir variantning joriy matnini widget'lardan (agar foydalanuvchi
-        # tahrirlagan bo'lsa) o'qib olamiz, keyin o'chiriladigan indexni tashlaymiz
-        current_texts = [
-            st.session_state.get(f"opt_{q_index}_{j}", opts[j]) for j in range(len(opts))
-        ]
-        old_correct = st.session_state.get(correct_key, 0)
-
-        del current_texts[opt_index]
-
-        # To'g'ri javob indexini yangi ro'yxatga moslab qayta hisoblaymiz
-        if opt_index < old_correct:
-            new_correct = old_correct - 1
-        elif opt_index == old_correct:
-            new_correct = 0
-        else:
-            new_correct = old_correct
-
-        st.session_state[opts_key] = current_texts
-        # Eski text_input key'larini tozalaymiz, aks holda Streamlit eski
-        # qiymatlarni indexlar siljigandan keyin ham ko'rsatib qo'yishi mumkin
-        for j in range(len(opts)):
-            st.session_state.pop(f"opt_{q_index}_{j}", None)
-        st.session_state[correct_key] = min(new_correct, max(len(current_texts) - 1, 0))
+        # tahrirlagan bo'lsa) o'qib olamiz - id barqaror bo'lgani uchun bu
+        # doim to'g'ri variantga mos keladi.
+        for opt in opts_list:
+            opt["text"] = st.session_state.get(f"opt_{q_index}_{opt['id']}", opt["text"])
+        new_list = [opt for opt in opts_list if opt["id"] != opt_id]
+        st.session_state[opts_key] = new_list
+        # O'chirilgan variantning widget key'ini ham tozalaymiz
+        st.session_state.pop(f"opt_{q_index}_{opt_id}", None)
+        # Agar o'chirilgan variant to'g'ri javob bo'lsa - birinchi qolganini
+        # to'g'ri javob qilib belgilaymiz
+        if st.session_state.get(correct_key) == opt_id:
+            st.session_state[correct_key] = new_list[0]["id"] if new_list else None
 
     def _add_option(q_index):
         opts_key = f"opts_{q_index}"
-        current_texts = [
-            st.session_state.get(f"opt_{q_index}_{j}", opts) for j, opts in enumerate(st.session_state[opts_key])
-        ]
-        current_texts.append("")
-        st.session_state[opts_key] = current_texts
+        opts_list = st.session_state[opts_key]
+        for opt in opts_list:
+            opt["text"] = st.session_state.get(f"opt_{q_index}_{opt['id']}", opt["text"])
+        new_id = _uuid.uuid4().hex[:8]
+        opts_list.append({"id": new_id, "text": ""})
+        st.session_state[opts_key] = opts_list
 
     edited_questions = []
     for i, q in enumerate(questions):
@@ -509,47 +521,45 @@ def main():
 
             # "edit.html" uslubi: har bir variant o'z qatorida - chap tomonda
             # A/B/C/D belgi-tugma (bosilsa o'sha variant TO'G'RI javob bo'ladi
-            # va yashil rangga o'tadi), o'rtada tahrirlanadigan matn, o'ngda
-            # o'chirish tugmasi. Hech qanday tugma bosish variantlarni
-            # "yopib" yoki tozalab qo'ymaydi - faqat session_state yangilanadi.
-            st.caption("To'g'ri javobni belgilash uchun harfni bosing:")
+            # va yashil rangga o'tadi), o'rtada tahrirlanadigan matn, ENG
+            # O'NGDA (qatorning oxirida) o'chirish (✕) tugmasi - xuddi
+            # edit.html'dagi kabi. Har bir variant BARQAROR id orqali
+            # kuzatilgani uchun (yuqoriga qarang) - biror variantni o'chirish
+            # boshqa qatorlarning matnini yoki holatini HECH QACHON
+            # "surib" yubormaydi, faqat o'sha bitta qator yo'qoladi.
+            st.caption("✓ To'g'ri javobni belgilash uchun harfni bosing • ✕ variantni o'chiradi")
             edited_options = []
-            for j in range(len(current_options)):
-                is_correct = (st.session_state[correct_key] == j)
-                col_lbl, col_opt, col_del = st.columns([1, 6, 1])
+            for j, opt in enumerate(current_options):
+                opt_id = opt["id"]
+                is_correct = (st.session_state[correct_key] == opt_id)
+                col_lbl, col_opt, col_del = st.columns([1, 7, 1])
                 with col_lbl:
                     lbl_type = "primary" if is_correct else "secondary"
                     if st.button(
-                        ("✅ " if is_correct else "") + chr(65 + j),
-                        key=f"setok_{i}_{j}",
+                        ("✓" if is_correct else chr(65 + j)),
+                        key=f"setok_{i}_{opt_id}",
                         type=lbl_type,
                         use_container_width=True,
                         help="To'g'ri javob sifatida belgilash",
                     ):
-                        st.session_state[correct_key] = j
+                        st.session_state[correct_key] = opt_id
                         st.rerun()
                 with col_opt:
                     val = st.text_input(
                         f"Variant {chr(65 + j)}",
-                        value=current_options[j],
-                        key=f"opt_{i}_{j}",
+                        value=opt["text"],
+                        key=f"opt_{i}_{opt_id}",
                         label_visibility="collapsed",
                         placeholder=f"Variant {chr(65 + j)}",
                     )
                     edited_options.append(val)
                 with col_del:
                     st.button(
-                        "🗑️", key=f"del_{i}_{j}",
+                        "✕", key=f"del_{i}_{opt_id}",
                         help=f"{chr(65 + j)} variantni o'chirish",
-                        on_click=_remove_option, args=(i, j),
+                        on_click=_remove_option, args=(i, opt_id),
                         disabled=len(current_options) <= 2,
                         use_container_width=True,
-                    )
-                if is_correct:
-                    st.markdown(
-                        '<div style="margin:-.5rem 0 .5rem 2px">'
-                        '<span class="tp-badge ok">✓ To\'g\'ri javob</span></div>',
-                        unsafe_allow_html=True,
                     )
 
             st.button(
@@ -559,10 +569,14 @@ def main():
                 disabled=len(current_options) >= 8,
             )
 
-            chosen = st.session_state[correct_key] if edited_options else None
-            if chosen is not None and chosen >= len(edited_options):
-                chosen = 0
-                st.session_state[correct_key] = 0
+            # correct_key variant ID sifatida saqlanadi - Word fayl uchun
+            # esa yakuniy INDEX kerak, shuning uchun joriy tartibga qarab
+            # id'ni indexga aylantiramiz.
+            correct_id = st.session_state[correct_key]
+            chosen = next(
+                (idx for idx, opt in enumerate(current_options) if opt["id"] == correct_id),
+                0 if edited_options else None,
+            )
 
             edited_questions.append({
                 "question": question_text,
