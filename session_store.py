@@ -1,28 +1,29 @@
 """
 session_store.py
 -----------------
-Bot (aiogram) va Streamlit Mini App orasida ma'lumot almashish uchun oddiy,
-RAM'dagi (xotiradagi) global saqlash joyi.
+Bot (aiogram) va Streamlit Mini App orasida ma'lumot almashish uchun saqlash
+qatlami. Uchta ishlash rejimi mavjud, ustuvorlik tartibida tanlanadi:
 
-MUHIM: Bu global dict faqat BITTA server jarayoni (process) ichida ishlaydi.
-Agar botni va Streamlit'ni ALOHIDA-ALOHIDA serverlarda (masalan botni bitta
-Render/VPS'da, Streamlit'ni boshqa joyda - Streamlit Cloud'da) ishga
-tushirsangiz, bu ikkalasi bir xil xotirani KO'RA OLMAYDI!
+1) SUPABASE_URL + SUPABASE_KEY berilgan bo'lsa -> Supabase (Postgres, REST
+   API orqali) ishlatiladi. BU ENG ISHONCHLI VARIANT: Streamlit Cloud
+   konteyneri qayta ishga tushsa yoki "uyqudan uyg'onsa" ham, yangi kod
+   deploy qilinsa ham - sessiyalar Supabase'da saqlanib qoladi, chunki bu
+   butunlay tashqi, doimiy (persistent) ma'lumotlar bazasi.
+2) SESSION_STORE_DIR muhit o'zgaruvchisi berilgan bo'lsa -> fayl-asosli
+   saqlash (vaqtinchalik diskka JSON). Streamlit Cloud konteyneri qayta
+   ishga tushirilganda yo'qolib ketishi mumkin - shuning uchun zaxira variant.
+3) Hech biri berilmasa -> oddiy RAM'dagi dict. Faqat bot va Streamlit BITTA
+   jarayonda ishlaganda ishlatilishi kerak.
 
-Shuning uchun ikkita ishlash rejimi bor:
-1) Agar bot va Streamlit BITTA jarayonda (masalan bitta VPS'da, ikkalasi ham
-   bir xil Python muhitida, masalan Streamlit threading orqali ishga tushirilsa)
-   - shu holda oddiy global dict YETARLI.
-2) Agar ular ALOHIDA serverlarda bo'lsa - session ma'lumotini JSON fayl
-   ko'rinishida umumiy diskka (yoki vaqtinchalik bulut saqlash joyiga) yozish
-   kerak bo'ladi. Quyidagi FileSessionStore shu holat uchun zaxira variant.
+Har uchala holatda ham: session ishi TUGAGANDAN keyin (Word fayl yuborilgach)
+clear_session() albatta chaqirilishi kerak.
 
-Standart holatda: agar SESSION_STORE_DIR muhit o'zgaruvchisi berilgan bo'lsa,
-fayl-asosli saqlash ishlatiladi (bu Streamlit Cloud + tashqi bot kabi holatlar
-uchun ishonchliroq). Aks holda - RAM'dagi dict ishlatiladi.
-
-Har ikkala holatda ham: session ishi TUGAGANDAN keyin (Word fayl yuborilgach)
-clear_session() albatta chaqirilishi kerak - shunda RAM/disk tozalanadi.
+--- Supabase jadvalini yaratish uchun SQL (bir marta, Supabase SQL editor'da) ---
+create table if not exists bot_sessions (
+    session_id text primary key,
+    data jsonb not null,
+    created_at double precision not null
+);
 """
 
 import os
@@ -32,8 +33,18 @@ import uuid
 import threading
 import tempfile
 
+try:
+    import requests as _requests
+except ImportError:  # requirements.txt'da bor, lekin himoya sifatida
+    _requests = None
+
 SESSION_STORE_DIR = os.environ.get('SESSION_STORE_DIR', '')
 SESSION_TTL_SECONDS = 60 * 60 * 3  # 3 soatdan keyin ishlatilmagan sessiyalar eskirgan hisoblanadi
+
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '') or os.environ.get('SUPABASE_SERVICE_KEY', '')
+SUPABASE_TABLE = os.environ.get('SUPABASE_SESSIONS_TABLE', 'bot_sessions')
+USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY and _requests)
 
 _lock = threading.Lock()
 _memory_store = {}  # session_id -> dict
@@ -47,6 +58,52 @@ def _file_path(session_id):
     base = SESSION_STORE_DIR or tempfile.gettempdir()
     os.makedirs(base, exist_ok=True)
     return os.path.join(base, f"session_{session_id}.json")
+
+
+def _supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_upsert(session_id, data):
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+    headers = _supabase_headers()
+    headers["Prefer"] = "resolution=merge-duplicates"
+    payload = {"session_id": session_id, "data": data, "created_at": data.get("created_at", time.time())}
+    resp = _requests.post(url, headers=headers, json=payload, timeout=10)
+    resp.raise_for_status()
+
+
+def _supabase_get(session_id):
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+    headers = _supabase_headers()
+    params = {"session_id": f"eq.{session_id}", "select": "data"}
+    resp = _requests.get(url, headers=headers, params=params, timeout=10)
+    resp.raise_for_status()
+    rows = resp.json()
+    if not rows:
+        return None
+    return rows[0]["data"]
+
+
+def _supabase_delete(session_id):
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+    headers = _supabase_headers()
+    params = {"session_id": f"eq.{session_id}"}
+    resp = _requests.delete(url, headers=headers, params=params, timeout=10)
+    resp.raise_for_status()
+
+
+def _supabase_list_all():
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
+    headers = _supabase_headers()
+    params = {"select": "session_id,created_at"}
+    resp = _requests.get(url, headers=headers, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def create_session(session_id, telegram_user_id, telegram_chat_id, default_filename="natija"):
@@ -67,7 +124,9 @@ def create_session(session_id, telegram_user_id, telegram_chat_id, default_filen
 
 def _save_session(session_id, data):
     with _lock:
-        if SESSION_STORE_DIR:
+        if USE_SUPABASE:
+            _supabase_upsert(session_id, data)
+        elif SESSION_STORE_DIR:
             path = _file_path(session_id)
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -77,7 +136,9 @@ def _save_session(session_id, data):
 
 def get_session(session_id):
     with _lock:
-        if SESSION_STORE_DIR:
+        if USE_SUPABASE:
+            return _supabase_get(session_id)
+        elif SESSION_STORE_DIR:
             path = _file_path(session_id)
             if not os.path.exists(path):
                 return None
@@ -97,9 +158,11 @@ def update_session(session_id, **fields):
 
 
 def clear_session(session_id):
-    """Sessiya ishi tugagach - RAM/diskdan butunlay o'chiradi."""
+    """Sessiya ishi tugagach - saqlash joyidan butunlay o'chiradi."""
     with _lock:
-        if SESSION_STORE_DIR:
+        if USE_SUPABASE:
+            _supabase_delete(session_id)
+        elif SESSION_STORE_DIR:
             path = _file_path(session_id)
             if os.path.exists(path):
                 os.remove(path)
@@ -112,7 +175,18 @@ def cleanup_expired_sessions():
     Buni davriy ravishda (masalan har soatda bir marta) chaqirish tavsiya etiladi."""
     now = time.time()
     with _lock:
-        if SESSION_STORE_DIR:
+        if USE_SUPABASE:
+            try:
+                rows = _supabase_list_all()
+            except Exception:
+                return
+            for row in rows:
+                if now - row.get("created_at", 0) > SESSION_TTL_SECONDS:
+                    try:
+                        _supabase_delete(row["session_id"])
+                    except Exception:
+                        continue
+        elif SESSION_STORE_DIR:
             base = SESSION_STORE_DIR or tempfile.gettempdir()
             if not os.path.isdir(base):
                 return
@@ -134,3 +208,4 @@ def cleanup_expired_sessions():
             ]
             for sid in expired:
                 _memory_store.pop(sid, None)
+

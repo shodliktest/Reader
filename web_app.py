@@ -141,6 +141,37 @@ div[data-testid="stRadio"] label:has(input:checked) {
 .tp-badge.warn { border-color: rgba(245,158,11,0.35); color: #D97706; background: rgba(245,158,11,0.08); }
 
 hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
+
+/* ------------------------------------------------------------------ */
+/* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi BIR QATORDA  */
+/* ------------------------------------------------------------------ */
+/* Ustunlarni vertikal markazga tekislaymiz - shunda doira-tugma, matn
+   maydoni va X tugmasi bir xil balandlikda, bitta chiziqda turadi
+   (avvalgi "ustma-ust" ko'rinish shundan kelib chiqqan edi - ustunlar
+   standart holatda tepaga tekislanadi). */
+div[data-testid="stHorizontalBlock"] { align-items: center; }
+
+/* Har bir variant qatoridagi ikkita tugma (chapdagi radio-doira,
+   o'ngdagi X) - shu qatorni "input[placeholder^='Variant']" mavjudligi
+   orqali aniqlaymiz (faqat variant matn maydonlarida shu placeholder
+   ishlatiladi), :has() bilan - shunda boshqa joydagi (savol kartasi
+   sarlavhasi, rasm tugmalari) tugmalarga umuman ta'sir qilmaydi. */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
+  width: 30px !important; height: 30px !important; min-width: 30px !important;
+  border-radius: 50% !important; padding: 0 !important;
+  font-size: 0 !important;
+  border: 2px solid var(--tp-border) !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
+  border-color: var(--tp-accent) !important;
+  box-shadow: inset 0 0 0 8px #fff, inset 0 0 0 30px var(--tp-accent) !important;
+}
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
+  width: 34px !important; height: 34px !important; min-width: 34px !important;
+  border-radius: 10px !important; padding: 0 !important;
+}
 </style>
 """
 st.markdown(_CARD_CSS, unsafe_allow_html=True)
@@ -527,16 +558,16 @@ def main():
             # kuzatilgani uchun (yuqoriga qarang) - biror variantni o'chirish
             # boshqa qatorlarning matnini yoki holatini HECH QACHON
             # "surib" yubormaydi, faqat o'sha bitta qator yo'qoladi.
-            st.caption("✓ To'g'ri javobni belgilash uchun harfni bosing • ✕ variantni o'chiradi")
+            st.caption("🔘 To'g'ri javobni belgilash uchun doirani bosing • ✕ variantni o'chiradi")
             edited_options = []
             for j, opt in enumerate(current_options):
                 opt_id = opt["id"]
                 is_correct = (st.session_state[correct_key] == opt_id)
-                col_lbl, col_opt, col_del = st.columns([1, 7, 1])
+                col_lbl, col_opt, col_del = st.columns([1, 8, 1], vertical_alignment="center")
                 with col_lbl:
                     lbl_type = "primary" if is_correct else "secondary"
                     if st.button(
-                        ("✓" if is_correct else chr(65 + j)),
+                        " ",
                         key=f"setok_{i}_{opt_id}",
                         type=lbl_type,
                         use_container_width=True,
