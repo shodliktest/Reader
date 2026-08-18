@@ -143,7 +143,7 @@ div[data-testid="stRadio"] label:has(input:checked) {
 hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
 
 /* ------------------------------------------------------------------ */
-/* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi BIR QATORDA  */
+/* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi BIR QATORDA */
 /* ------------------------------------------------------------------ */
 /* Mobil qurilmalarda ham ustma-ust tushib ketmasligi uchun (majburiy bir qatorda ushlash) */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
@@ -151,53 +151,84 @@ div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   align-items: center !important;
-  gap: 0.5rem !important;
+  gap: 0.6rem !important;
 }
 
-/* Kolonkalarni kengligini moslash */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"] {
-  width: auto !important;
-  flex: 0 0 auto !important;
-  min-width: 0 !important;
+/* 1. Kolonkalar o'lchamiga qat'iy cheklov */
+/* Chap ustun (Doira tugma uchun) */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:first-of-type {
+  flex: 0 0 24px !important; /* faqat 24px joy oladi */
+  width: 24px !important;
+  min-width: 24px !important;
+  max-width: 24px !important;
 }
-/* O'rtadagi input qismi barcha mavjud bo'sh joyni egallashi uchun */
+/* O'rtadagi ustun (Input matn uchun barcha joyni oladi) */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
-  flex: 1 1 100% !important;
+  flex: 1 1 auto !important;
+  width: auto !important;
+}
+/* O'ng ustun (X tugmasi uchun) */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:last-of-type {
+  flex: 0 0 32px !important; /* faqat 32px joy oladi */
+  width: 32px !important;
+  min-width: 32px !important;
+  max-width: 32px !important;
 }
 
-/* Doira tugma dizayni */
+/* 2. Doira tugma dizayni va QAT'IY o'lchami */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
-  width: 26px !important; height: 26px !important; min-width: 26px !important;
-  border-radius: 50% !important; padding: 0 !important;
+  width: 24px !important; 
+  height: 24px !important; 
+  min-width: 24px !important; 
+  max-width: 24px !important;
+  min-height: 24px !important;
+  max-height: 24px !important;
+  border-radius: 50% !important; 
+  padding: 0 !important;
+  margin: 0 !important;
   font-size: 0 !important;
   border: 2px solid var(--tp-accent) !important;
   background: #fff !important;
   box-shadow: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 /* To'g'ri belgilangandagi holat */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
-  box-shadow: inset 0 0 0 5px #fff, inset 0 0 0 26px var(--tp-accent) !important;
+  box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 24px var(--tp-accent) !important;
 }
 
-/* Input (Matn) dizayni rasmdagidek yumaloq va chiroyli bo'lishi uchun */
+/* 3. Input (Matn) dizayni rasmdagidek yumaloq va chiroyli bo'lishi uchun */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) input {
   border-radius: 12px !important;
   background-color: #F8F9FA !important;
   border: 1px solid var(--tp-border) !important;
+  padding: 0.5rem 0.8rem !important; /* Ichki bo'shliqni chiroyli qilish */
 }
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) input:focus {
   border-color: var(--tp-accent) !important;
   box-shadow: 0 0 0 1px var(--tp-accent) !important;
-  background-color: rgba(79,70,229,0.05) !important;
+  background-color: rgba(79,70,229,0.03) !important;
 }
 
-/* O'chirish (X) tugmasi dizayni */
+/* 4. O'chirish (X) tugmasi dizayni va QAT'IY o'lchami */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
-  width: 32px !important; height: 32px !important; min-width: 32px !important;
-  border-radius: 8px !important; padding: 0 !important;
+  width: 32px !important; 
+  height: 32px !important; 
+  min-width: 32px !important; 
+  max-width: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  border-radius: 8px !important; 
+  padding: 0 !important;
+  margin: 0 !important;
   background-color: #F3E8FF !important;
   color: #6B21A8 !important;
   border: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 
 /* Yangi variant qo'shish tugmasi chiziqli dizayni */
