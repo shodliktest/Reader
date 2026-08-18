@@ -145,32 +145,67 @@ hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 
 /* ------------------------------------------------------------------ */
 /* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi BIR QATORDA  */
 /* ------------------------------------------------------------------ */
-/* Ustunlarni vertikal markazga tekislaymiz - shunda doira-tugma, matn
-   maydoni va X tugmasi bir xil balandlikda, bitta chiziqda turadi
-   (avvalgi "ustma-ust" ko'rinish shundan kelib chiqqan edi - ustunlar
-   standart holatda tepaga tekislanadi). */
-div[data-testid="stHorizontalBlock"] { align-items: center; }
+/* Mobil qurilmalarda ham ustma-ust tushib ketmasligi uchun (majburiy bir qatorda ushlash) */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  gap: 0.5rem !important;
+}
 
-/* Har bir variant qatoridagi ikkita tugma (chapdagi radio-doira,
-   o'ngdagi X) - shu qatorni "input[placeholder^='Variant']" mavjudligi
-   orqali aniqlaymiz (faqat variant matn maydonlarida shu placeholder
-   ishlatiladi), :has() bilan - shunda boshqa joydagi (savol kartasi
-   sarlavhasi, rasm tugmalari) tugmalarga umuman ta'sir qilmaydi. */
+/* Kolonkalarni kengligini moslash */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"] {
+  width: auto !important;
+  flex: 0 0 auto !important;
+  min-width: 0 !important;
+}
+/* O'rtadagi input qismi barcha mavjud bo'sh joyni egallashi uchun */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
+  flex: 1 1 100% !important;
+}
+
+/* Doira tugma dizayni */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
-  width: 30px !important; height: 30px !important; min-width: 30px !important;
+  width: 26px !important; height: 26px !important; min-width: 26px !important;
   border-radius: 50% !important; padding: 0 !important;
   font-size: 0 !important;
-  border: 2px solid var(--tp-border) !important;
+  border: 2px solid var(--tp-accent) !important;
   background: #fff !important;
   box-shadow: none !important;
 }
+/* To'g'ri belgilangandagi holat */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
-  border-color: var(--tp-accent) !important;
-  box-shadow: inset 0 0 0 8px #fff, inset 0 0 0 30px var(--tp-accent) !important;
+  box-shadow: inset 0 0 0 5px #fff, inset 0 0 0 26px var(--tp-accent) !important;
 }
+
+/* Input (Matn) dizayni rasmdagidek yumaloq va chiroyli bo'lishi uchun */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) input {
+  border-radius: 12px !important;
+  background-color: #F8F9FA !important;
+  border: 1px solid var(--tp-border) !important;
+}
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) input:focus {
+  border-color: var(--tp-accent) !important;
+  box-shadow: 0 0 0 1px var(--tp-accent) !important;
+  background-color: rgba(79,70,229,0.05) !important;
+}
+
+/* O'chirish (X) tugmasi dizayni */
 div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
-  width: 34px !important; height: 34px !important; min-width: 34px !important;
-  border-radius: 10px !important; padding: 0 !important;
+  width: 32px !important; height: 32px !important; min-width: 32px !important;
+  border-radius: 8px !important; padding: 0 !important;
+  background-color: #F3E8FF !important;
+  color: #6B21A8 !important;
+  border: none !important;
+}
+
+/* Yangi variant qo'shish tugmasi chiziqli dizayni */
+button:has(div:contains("+ Variant qo'shish")) {
+    border-style: dashed !important;
+    border-radius: 12px !important;
+    color: #94A3B8 !important;
+    border-color: rgba(148,163,184,0.5) !important;
 }
 </style>
 """
@@ -594,7 +629,7 @@ def main():
                     )
 
             st.button(
-                "➕ Yangi variant qo'shish", key=f"add_{i}",
+                "+ Variant qo'shish", key=f"add_{i}",
                 on_click=_add_option, args=(i,),
                 use_container_width=True,
                 disabled=len(current_options) >= 8,
