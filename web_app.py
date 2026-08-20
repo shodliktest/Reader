@@ -150,10 +150,10 @@ div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) {
 
 /* Ustunlarga qat'iy cheklov (ekranni kengaytirib yubormaydi) */
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:first-of-type {
-  flex: 0 0 18px !important;
-  width: 18px !important;
-  min-width: 18px !important;
-  max-width: 18px !important;
+  flex: 0 0 30px !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
   padding-top: 0.35rem !important;
 }
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
@@ -161,34 +161,34 @@ div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div
   min-width: 0 !important;
 }
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:last-of-type {
-  flex: 0 0 18px !important;
-  width: 18px !important;
-  min-width: 18px !important;
-  max-width: 18px !important;
+  flex: 0 0 30px !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
   padding-top: 0.35rem !important;
 }
 
-/* 1. Qora yumaloq to'g'ri javob belgilash tugmasi (maksimal kichik) */
+/* 1. To'g'ri javob belgilash tugmasi (emoji, maksimal kichik) */
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
-  width: 16px !important; 
-  height: 16px !important; 
-  min-width: 16px !important; 
-  max-width: 16px !important;
-  min-height: 16px !important;
-  max-height: 16px !important;
-  border-radius: 50% !important; 
+  width: 26px !important; 
+  height: 26px !important; 
+  min-width: 26px !important; 
+  max-width: 26px !important;
+  min-height: 26px !important;
+  max-height: 26px !important;
   padding: 0 !important;
   margin: 0 !important;
-  font-size: 0 !important;
-  border: 1.5px solid var(--tp-accent) !important;
-  background: #fff !important;
+  font-size: 0.85rem !important;
+  line-height: 1 !important;
+  border: none !important;
+  background: transparent !important;
   box-shadow: none !important;
-}
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
-  box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 12px var(--tp-accent) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 
-/* 2. Matn maydoni dizayni (endi textarea - uzun matn 2-qatorga tushadi) */
+/* 2. Matn maydoni dizayni (textarea - uzun matn qatorlarga tushadi) */
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) textarea {
   border-radius: 10px !important;
   background-color: #F8F9FA !important;
@@ -202,22 +202,21 @@ div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) texta
   overflow-y: hidden !important;
 }
 
-/* 3. X o'chirish tugmasi (maksimal kichik) */
+/* 3. O'chirish tugmasi (emoji, maksimal kichik) */
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
-  width: 18px !important; 
-  height: 18px !important; 
-  min-width: 18px !important; 
-  max-width: 18px !important;
-  min-height: 18px !important;
-  max-height: 18px !important;
-  border-radius: 6px !important; 
+  width: 26px !important; 
+  height: 26px !important; 
+  min-width: 26px !important; 
+  max-width: 26px !important;
+  min-height: 26px !important;
+  max-height: 26px !important;
   padding: 0 !important;
   margin: 0 !important;
-  font-size: 0.6rem !important;
+  font-size: 0.8rem !important;
   line-height: 1 !important;
-  background-color: #F3E8FF !important;
-  color: #6B21A8 !important;
   border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
@@ -526,14 +525,12 @@ def main():
             for j, opt in enumerate(current_options):
                 opt_id = opt["id"]
                 is_correct = (st.session_state[correct_key] == opt_id)
-                col_lbl, col_opt, col_del = st.columns([1, 8, 1], vertical_alignment="center")
+                col_lbl, col_opt, col_del = st.columns([1, 24, 1], vertical_alignment="center")
                 with col_lbl:
-                    lbl_type = "primary" if is_correct else "secondary"
+                    lbl_emoji = "✅" if is_correct else "⚪"
                     if st.button(
-                        " ",
+                        lbl_emoji,
                         key=f"setok_{i}_{opt_id}",
-                        type=lbl_type,
-                        use_container_width=True,
                         help="To'g'ri javob sifatida belgilash",
                     ):
                         st.session_state[correct_key] = opt_id
@@ -550,11 +547,10 @@ def main():
                     edited_options.append(val)
                 with col_del:
                     st.button(
-                        "✕", key=f"del_{i}_{opt_id}",
+                        "🗑️", key=f"del_{i}_{opt_id}",
                         help=f"{chr(65 + j)} variantni o'chirish",
                         on_click=_remove_option, args=(i, opt_id),
                         disabled=len(current_options) <= 2,
-                        use_container_width=True,
                     )
 
             st.button(
