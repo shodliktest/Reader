@@ -74,7 +74,6 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 st.set_page_config(page_title="Test natijalarini tekshirish", layout="centered")
 
 # --- "edit.html" (TestPro) uslubidagi karta-asosli dizayn va RESPONSIV CSS ---
-# Bug keltirib chiqaruvchi murakkab :has selektorlari olib tashlandi
 _CARD_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Unbounded:wght@700;800;900&display=swap');
@@ -135,6 +134,69 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 .tp-badge.warn { border-color: rgba(245,158,11,0.35); color: #D97706; background: rgba(245,158,11,0.08); }
 
 hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
+
+/* ------------------------------------------------------------------ */
+/* VARIANT MATN MAYDONI (textarea) dizayni */
+/* ------------------------------------------------------------------ */
+div[data-testid="stTextArea"]:has(textarea[placeholder^="Variant"]) textarea {
+  border-radius: 10px !important;
+  background-color: #F8F9FA !important;
+  border: 1px solid var(--tp-border) !important;
+  padding: 0.4rem 0.6rem !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  resize: none !important;
+  min-height: 2.6rem !important;
+  line-height: 1.3 !important;
+  overflow-y: hidden !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* VARIANT AMAL TUGMALARI (✅/⚪ va 🗑️) — fit-content, hech qanday katta
+   quti hosil bo'lmasligi uchun har bir wrapper qatlami o'z tarkibiga
+   moslashtiriladi (fixed px o'rniga fit-content, chunki Streamlit
+   versiyasiga qarab column kengligi hisoblanishi turlicha bo'ladi) */
+/* ------------------------------------------------------------------ */
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]),
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) {
+  gap: 0.25rem !important;
+  align-items: center !important;
+}
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="column"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="column"] {
+  width: fit-content !important;
+  flex: 0 0 fit-content !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stVerticalBlock"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stVerticalBlock"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stElementContainer"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stElementContainer"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stButton"],
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stButton"] {
+  width: fit-content !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) button,
+div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) button {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  font-size: 0.9rem !important;
+  line-height: 1 !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--tp-border) !important;
+  background: #F8F9FA !important;
+  box-shadow: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
 </style>
 """
 st.markdown(_CARD_CSS, unsafe_allow_html=True)
@@ -434,44 +496,38 @@ def main():
             correct_key = f"correct_{i}"
             current_options = st.session_state[opts_key]
 
-            st.caption("🔘 To'g'ri javobni belgilash uchun doirani bosing • ✕ variantni o'chiradi")
+            st.caption("🔘 To'g'ri javobni belgilash uchun bosing • 🗑️ variantni o'chiradi")
             edited_options = []
-            
-            # --- ASOSIY O'ZGARISH SHU YERDA: Ustunlar masofasi va type="tertiary" ---
             for j, opt in enumerate(current_options):
                 opt_id = opt["id"]
                 is_correct = (st.session_state[correct_key] == opt_id)
-                
-                # Masofani kichik qilib (gap="small"), ustunlar nisbatini to'g'riladik
-                col_lbl, col_opt, col_del = st.columns([1.5, 10, 1.5], gap="small", vertical_alignment="center")
-                
+
+                val = st.text_area(
+                    f"Variant {chr(65 + j)}",
+                    value=opt["text"],
+                    key=f"opt_{i}_{opt_id}",
+                    label_visibility="collapsed",
+                    placeholder=f"Variant {chr(65 + j)}",
+                    height=68,
+                )
+                edited_options.append(val)
+
+                col_lbl, col_del, col_spacer = st.columns([1, 1, 10])
                 with col_lbl:
                     lbl_emoji = "✅" if is_correct else "⚪"
                     if st.button(
                         lbl_emoji,
                         key=f"setok_{i}_{opt_id}",
                         help="To'g'ri javob sifatida belgilash",
-                        type="tertiary" # Konteynerni olib tashlaydi!
                     ):
                         st.session_state[correct_key] = opt_id
                         st.rerun()
-                with col_opt:
-                    val = st.text_area(
-                        f"Variant {chr(65 + j)}",
-                        value=opt["text"],
-                        key=f"opt_{i}_{opt_id}",
-                        label_visibility="collapsed",
-                        placeholder=f"Variant {chr(65 + j)}",
-                        height=68,
-                    )
-                    edited_options.append(val)
                 with col_del:
                     st.button(
                         "🗑️", key=f"del_{i}_{opt_id}",
                         help=f"{chr(65 + j)} variantni o'chirish",
                         on_click=_remove_option, args=(i, opt_id),
                         disabled=len(current_options) <= 2,
-                        type="tertiary" # Konteynerni olib tashlaydi!
                     )
 
             st.button(
