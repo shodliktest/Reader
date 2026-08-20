@@ -51,7 +51,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery, FSInputFile,
-    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -102,12 +102,23 @@ def collecting_keyboard(count):
 
 
 def review_keyboard(session_id):
-    """Qayta ishlangandan keyin - Streamlit Mini App'ga o'tish tugmasi."""
+    """Qayta ishlangandan keyin - tahrirlash sahifasiga o'tish tugmasi.
+
+    MUHIM: bu ataylab oddiy `url=` tugma (Telegram Mini App / WebAppInfo EMAS).
+    Mini App rejimida Telegram o'zining tor WebView'ini ochadi, u yerda
+    ekran eni juda cheklangan bo'lib, Streamlit'ning `st.columns` responsive
+    xatti-harakati (tor kolonkalarni avtomatik vertikal stackka o'tkazishi)
+    tugmalarni bir-birining ustiga chiqarib yuborardi. Oddiy `url=` tugma esa
+    havolani qurilmaning ODATIY brauzerida (Chrome/Safari) ochadi - u yerda
+    ekran kengligi WebView'dagidan farqli hisoblanadi va bu muammo yo'q.
+    Sessiya avvalgidek `?session_id=` query parametri orqali ishlaydi -
+    Telegram initData ishlatilmagani uchun boshqa hech narsa o'zgarmaydi.
+    """
     if not WEBAPP_BASE_URL:
         return None
     url = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Tekshirish", web_app=WebAppInfo(url=url))]
+        [InlineKeyboardButton(text="🔍 Tekshirish", url=url)]
     ])
 
 
