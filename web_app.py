@@ -159,13 +159,18 @@ div[data-testid="stTextArea"]:has(textarea[placeholder^="Variant"]) textarea {
 /* ------------------------------------------------------------------ */
 div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]),
 div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
   gap: 0.25rem !important;
   align-items: center !important;
+  width: auto !important;
 }
 div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="column"],
 div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="column"] {
   width: fit-content !important;
   flex: 0 0 fit-content !important;
+  flex-shrink: 0 !important;
   min-width: 0 !important;
   padding: 0 !important;
 }
