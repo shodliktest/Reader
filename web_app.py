@@ -150,32 +150,45 @@ hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 
    ustunlarni avtomatik ravishda vertikal ustma-ust joylashtirib
    yuboradi (aynan shu narsa "doira va X bir-birining tagida" ko'rinishga
    sabab bo'lgan edi). */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) {
   display: flex !important;
   flex-direction: row !important;
   flex-wrap: nowrap !important;
-  align-items: center !important;
+  align-items: flex-start !important;
   gap: 0.4rem !important;
   width: 100% !important;
 }
 
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:first-child,
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type,
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:last-child,
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div:first-child,
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type,
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div:last-child,
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type {
   flex: 0 0 auto !important;
   width: auto !important;
   min-width: 0 !important;
   flex-shrink: 0 !important;
   flex-grow: 0 !important;
+  padding-top: 0.3rem !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:nth-child(2),
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:nth-of-type(2) {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div:nth-child(2),
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:nth-of-type(2) {
   flex: 1 1 auto !important;
   min-width: 0 !important;
 }
 
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) textarea {
+  border-radius: 10px !important;
+  background-color: #F8F9FA !important;
+  border: 1px solid var(--tp-border) !important;
+  padding: 0.4rem 0.6rem !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  resize: none !important;
+  line-height: 1.35 !important;
+  overflow-y: hidden !important;
+}
+
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
   width: 30px !important; height: 30px !important; min-width: 30px !important;
   border-radius: 50% !important; padding: 0 !important;
   font-size: 0 !important;
@@ -183,11 +196,11 @@ div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-te
   background: #fff !important;
   box-shadow: none !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
   border-color: var(--tp-accent) !important;
   box-shadow: inset 0 0 0 8px #fff, inset 0 0 0 30px var(--tp-accent) !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
   width: 34px !important; height: 34px !important; min-width: 34px !important;
   border-radius: 10px !important; padding: 0 !important;
 }
@@ -595,12 +608,13 @@ def main():
                         st.session_state[correct_key] = opt_id
                         st.rerun()
                 with col_opt:
-                    val = st.text_input(
+                    val = st.text_area(
                         f"Variant {chr(65 + j)}",
                         value=opt["text"],
                         key=f"opt_{i}_{opt_id}",
                         label_visibility="collapsed",
                         placeholder=f"Variant {chr(65 + j)}",
+                        height=68,
                     )
                     edited_options.append(val)
                 with col_del:
