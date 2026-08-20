@@ -378,6 +378,22 @@ def main():
         opts_list.append({"id": new_id, "text": ""})
         st.session_state[opts_key] = opts_list
 
+    def _option_height(text: str) -> int:
+        """Variant matni uzunligiga qarab textarea balandligini hisoblaydi -
+        qisqa variant 1 qatorga ixcham sig'adi, uzun variant esa (10
+        qatorgacha) avtomatik kengayadi. Shunda hech qanday scrollbar yoki
+        kesilgan matn qolmaydi, va qisqa variantlar bo'sh joy egallamaydi."""
+        chars_per_line = 38  # taxminan shu ustun kengligiga to'g'ri keladi
+        text = text or ""
+        # Foydalanuvchi Enter bosgan qatorlarni ham hisobga olamiz
+        wrapped_lines = 0
+        for line in text.split("\n"):
+            wrapped_lines += max(1, -(-len(line) // chars_per_line))  # ceil
+        lines = max(1, min(10, wrapped_lines))
+        line_h = 24  # bitta matn qatorining taxminiy pikselli balandligi
+        padding = 22  # textarea ichki padding + border
+        return max(68, lines * line_h + padding)
+
     edited_questions = []
     for i, q in enumerate(questions):
         # "edit.html" uslubidagi doim-ochiq karta: st.expander o'rniga -
@@ -608,13 +624,14 @@ def main():
                         st.session_state[correct_key] = opt_id
                         st.rerun()
                 with col_opt:
+                    _current_text = st.session_state.get(f"opt_{i}_{opt_id}", opt["text"])
                     val = st.text_area(
                         f"Variant {chr(65 + j)}",
                         value=opt["text"],
                         key=f"opt_{i}_{opt_id}",
                         label_visibility="collapsed",
                         placeholder=f"Variant {chr(65 + j)}",
-                        height=68,
+                        height=_option_height(_current_text),
                     )
                     edited_options.append(val)
                 with col_del:
