@@ -73,7 +73,9 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 
 st.set_page_config(page_title="Test natijalarini tekshirish", layout="centered")
 
-# --- "edit.html" (TestPro) uslubidagi karta-asosli dizayn va RESPONSIV CSS ---
+# --- "edit.html" (TestPro) uslubidagi karta-asosli dizayn -----------------
+# Bu faqat vizual qatlam - pastdagi mantiq (session_state) hech narsani
+# yo'qotmasligi uchun alohida ishlab chiqilgan (pastga qarang).
 _CARD_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Unbounded:wght@700;800;900&display=swap');
@@ -89,14 +91,6 @@ _CARD_CSS = """
 
 html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 
-/* Sahifaning yon tomonga kengayib ketishining oldini olish va responsivlik */
-.main .block-container {
-  max-width: 100% !important;
-  padding-left: 0.75rem !important;
-  padding-right: 0.75rem !important;
-  box-sizing: border-box !important;
-}
-
 /* Savol kartasi */
 .tp-card {
   border: 1.5px solid var(--tp-border);
@@ -104,8 +98,6 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
   margin-bottom: 14px;
   overflow: hidden;
   background: var(--tp-bg-2);
-  width: 100% !important;
-  box-sizing: border-box !important;
 }
 .tp-card-hdr {
   display: flex; align-items: center; gap: .5rem;
@@ -124,6 +116,21 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
   font-family: 'Unbounded', sans-serif; font-weight: 800; font-size: .78rem;
 }
 
+/* Streamlit radio -> variant tanlagichni "chip" ko'rinishiga yaqinlashtiramiz */
+div[data-testid="stRadio"] > div { gap: .35rem; }
+div[data-testid="stRadio"] label {
+  border: 1.5px solid var(--tp-border);
+  border-radius: 10px;
+  padding: .4rem .65rem;
+  margin-bottom: .3rem;
+  width: 100%;
+  transition: all .15s ease;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+  border-color: rgba(16,185,129,0.5);
+  background: rgba(16,185,129,0.08);
+}
+
 .tp-badge {
   display: inline-block; font-size: .72rem; font-weight: 700;
   padding: .2rem .6rem; border-radius: 99px;
@@ -136,71 +143,53 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
 
 /* ------------------------------------------------------------------ */
-/* VARIANT MATN MAYDONI (textarea) dizayni */
+/* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi BIR QATORDA  */
 /* ------------------------------------------------------------------ */
-div[data-testid="stTextArea"]:has(textarea[placeholder^="Variant"]) textarea {
-  border-radius: 10px !important;
-  background-color: #F8F9FA !important;
-  border: 1px solid var(--tp-border) !important;
-  padding: 0.4rem 0.6rem !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  resize: none !important;
-  min-height: 2.6rem !important;
-  line-height: 1.3 !important;
-  overflow-y: hidden !important;
-}
-
-/* ------------------------------------------------------------------ */
-/* VARIANT AMAL TUGMALARI (✅/⚪ va 🗑️) — fit-content, hech qanday katta
-   quti hosil bo'lmasligi uchun har bir wrapper qatlami o'z tarkibiga
-   moslashtiriladi (fixed px o'rniga fit-content, chunki Streamlit
-   versiyasiga qarab column kengligi hisoblanishi turlicha bo'ladi) */
-/* ------------------------------------------------------------------ */
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]),
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) {
+/* Qatorning o'zini qat'iy gorizontal, hech qachon o'ralmaydigan (nowrap)
+   flex qilib belgilaymiz - aks holda tor (mobil) ekranda Streamlit
+   ustunlarni avtomatik ravishda vertikal ustma-ust joylashtirib
+   yuboradi (aynan shu narsa "doira va X bir-birining tagida" ko'rinishga
+   sabab bo'lgan edi). */
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
   display: flex !important;
   flex-direction: row !important;
   flex-wrap: nowrap !important;
-  gap: 0.25rem !important;
   align-items: center !important;
+  gap: 0.4rem !important;
+  width: 100% !important;
+}
+
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:first-child,
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type,
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:last-child,
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type {
+  flex: 0 0 auto !important;
   width: auto !important;
-}
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="column"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="column"] {
-  width: fit-content !important;
-  flex: 0 0 fit-content !important;
+  min-width: 0 !important;
   flex-shrink: 0 !important;
-  min-width: 0 !important;
-  padding: 0 !important;
+  flex-grow: 0 !important;
 }
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stVerticalBlock"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stVerticalBlock"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stElementContainer"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stElementContainer"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) [data-testid="stButton"],
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) [data-testid="stButton"] {
-  width: fit-content !important;
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div:nth-child(2),
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:nth-of-type(2) {
+  flex: 1 1 auto !important;
   min-width: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
 }
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="belgilash"]) button,
-div[data-testid="stHorizontalBlock"]:has(button[aria-label*="o'chirish"]) button {
-  width: 30px !important;
-  height: 30px !important;
-  min-width: 30px !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  font-size: 0.9rem !important;
-  line-height: 1 !important;
-  border-radius: 8px !important;
-  border: 1px solid var(--tp-border) !important;
-  background: #F8F9FA !important;
+
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
+  width: 30px !important; height: 30px !important; min-width: 30px !important;
+  border-radius: 50% !important; padding: 0 !important;
+  font-size: 0 !important;
+  border: 2px solid var(--tp-border) !important;
+  background: #fff !important;
   box-shadow: none !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
+}
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
+  border-color: var(--tp-accent) !important;
+  box-shadow: inset 0 0 0 8px #fff, inset 0 0 0 30px var(--tp-accent) !important;
+}
+div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
+  width: 34px !important; height: 34px !important; min-width: 34px !important;
+  border-radius: 10px !important; padding: 0 !important;
 }
 </style>
 """
@@ -208,6 +197,14 @@ st.markdown(_CARD_CSS, unsafe_allow_html=True)
 
 
 # --- Botni fon-thread sifatida BIR MARTA ishga tushirish ---
+#
+# CloneBot/QuizMakerBot loyihalaringizdagi bilan bir xil naqsh:
+# @st.cache_resource orqali Streamlit'ning o'zi "bu funksiya faqat BIR MARTA
+# ishlasin" degan kafolatni beradi - keyingi har qanday sahifa yangilanishi
+# (rerun, boshqa foydalanuvchi so'rovi va h.k.) da qayta CHAQIRILMAYDI, faqat
+# birinchi natija keshdan qaytariladi. Haqiqiy polling esa bot.py'dagi
+# run_in_background() ichida - u yana OS-darajasidagi fayl-lock bilan ham
+# himoyalangan (ikkinchi bosqich xavfsizlik).
 @st.cache_resource
 def _start_bot_once():
     try:
@@ -288,17 +285,32 @@ def main():
     st.title("📋 Natijalarni tekshirish")
     st.caption(f"Jami {len(questions)} ta savol topildi. Kerak bo'lsa tahrirlang.")
 
-    # Fayl nomi maydoni
+    # Fayl nomi maydoni - standart qiymat zip fayl nomi (yoki bot bergan default)
     default_name = data.get("default_filename", "natija")
     filename = st.text_input("📁 Word fayl nomi", value=default_name)
 
     st.divider()
 
+    # Har bir savol uchun variantlar ro'yxati session_state'da saqlanadi.
+    #
+    # MUHIM TUZATISH: har bir variant endi index (0,1,2...) emas, balki
+    # BARQAROR, hech qachon o'zgarmaydigan ID (uuid) orqali kuzatiladi.
+    # Oldingi versiyada widget key'lari "opt_{savol}_{index}" edi - biror
+    # variant o'chirilganda pastdagilarning INDEXI siljib qolgani uchun,
+    # Streamlit ularni "xuddi shu key" deb hisoblab ESKI matnni ko'rsatib
+    # qo'yardi (go'yo variant o'zgarib/almashib ketgandek ko'rinardi).
+    # Endi har bir variant {"id": "...", "text": "..."} ko'rinishida
+    # saqlanadi va widget key'i shu barqaror id'ga bog'lanadi - shuning
+    # uchun o'chirish/qo'shish paytida boshqa variantlar hech qachon
+    # "sakrab" yoki almashib qolmaydi.
     import uuid as _uuid
 
     for i, q in enumerate(questions):
         opts_key = f"opts_{i}"
         if opts_key not in st.session_state:
+            # Bo'sh (yoki faqat probel) variantlarni avtomatik olib tashlaymiz -
+            # OCR ba'zan "D)" kabi bo'sh quti chiqarib qo'yishi mumkin, foydalanuvchi
+            # har safar qo'lda o'chirib o'tirmasin.
             raw_opts = q.get("options", [])
             non_empty_opts = [o for o in raw_opts if o and o.strip()]
             st.session_state[opts_key] = [
@@ -307,12 +319,17 @@ def main():
         correct_key = f"correct_{i}"
         if correct_key not in st.session_state:
             ci = q.get("correct_index")
+            # correct_index ham bo'sh variantlar olib tashlangandan keyingi
+            # yangi ro'yxatga mos ravishda qayta hisoblanadi
             raw_opts = q.get("options", [])
             if ci is not None and 0 <= ci < len(raw_opts):
                 removed_before = sum(
                     1 for o in raw_opts[:ci] if not (o and o.strip())
                 )
                 ci = ci - removed_before if raw_opts[ci] and raw_opts[ci].strip() else 0
+            # correct_key endi variant ID'sini saqlaydi (index emas) -
+            # shunda variantlar tartibi o'zgarganda ham to'g'ri javob
+            # "adashib" qolmaydi.
             opts_list = st.session_state[opts_key]
             ci = ci if ci is not None else 0
             st.session_state[correct_key] = (
@@ -325,11 +342,17 @@ def main():
         opts_list = st.session_state[opts_key]
         if len(opts_list) <= 2:
             return
+        # Har bir variantning joriy matnini widget'lardan (agar foydalanuvchi
+        # tahrirlagan bo'lsa) o'qib olamiz - id barqaror bo'lgani uchun bu
+        # doim to'g'ri variantga mos keladi.
         for opt in opts_list:
             opt["text"] = st.session_state.get(f"opt_{q_index}_{opt['id']}", opt["text"])
         new_list = [opt for opt in opts_list if opt["id"] != opt_id]
         st.session_state[opts_key] = new_list
+        # O'chirilgan variantning widget key'ini ham tozalaymiz
         st.session_state.pop(f"opt_{q_index}_{opt_id}", None)
+        # Agar o'chirilgan variant to'g'ri javob bo'lsa - birinchi qolganini
+        # to'g'ri javob qilib belgilaymiz
         if st.session_state.get(correct_key) == opt_id:
             st.session_state[correct_key] = new_list[0]["id"] if new_list else None
 
@@ -344,6 +367,11 @@ def main():
 
     edited_questions = []
     for i, q in enumerate(questions):
+        # "edit.html" uslubidagi doim-ochiq karta: st.expander o'rniga -
+        # chunki expander holati (ochiq/yopiq) foydalanuvchi bosgan joyni
+        # keyingi rerun'da eslab qololmaydi va tasodifan yopilib qoladi.
+        # st.container(border=True) esa hech qachon o'z-o'zidan yopilmaydi -
+        # karta har doim ochiq turadi, hech narsa yo'qolmaydi.
         num_label = f"{i + 1}-savol"
         card = st.container(border=True)
         with card:
@@ -361,13 +389,19 @@ def main():
             if q.get("error"):
                 st.warning(f"OCR ogohlantirishi: {q['error']}")
 
+            # --- Rasm bilan ishlash: yoqish/o'chirish + kerakli qismini kesish ---
             use_image_key = f"use_image_{i}"
+            crop_box_key = f"crop_box_{i}"
             final_image_b64 = None
 
             if q.get("image_b64"):
                 if use_image_key not in st.session_state:
                     st.session_state[use_image_key] = True
 
+                # Yakuniy (Word faylga tushadigan) rasm alohida saqlanadi.
+                # Bu birinchi marta ishga tushganda ORIGINAL rasmga teng bo'ladi
+                # va faqat foydalanuvchi "Kesish" tugmasini bossagina o'zgaradi -
+                # sichqonchani sudrab yurishning o'zi hech narsani kesib qo'ymaydi.
                 final_image_key = f"final_image_{i}"
                 if final_image_key not in st.session_state:
                     st.session_state[final_image_key] = q["image_b64"]
@@ -396,6 +430,9 @@ def main():
                             width=250,
                         )
 
+                        # Kerakli (foto) qismini avtomatik aniqlashga harakat qilamiz -
+                        # topilsa, foydalanuvchi bitta tugma bosish bilan (cropper
+                        # oynasini ochmasdan) o'sha qismini qabul qilishi mumkin.
                         auto_box_key = f"auto_box_{i}"
                         if auto_box_key not in st.session_state:
                             st.session_state[auto_box_key] = detect_photo_region(orig_img)
@@ -427,10 +464,28 @@ def main():
                                 st.rerun()
 
                         if st.session_state[crop_mode_key]:
+                            # auto_box yuqorida allaqachon hisoblangan
+                            if auto_box:
+                                st.caption(
+                                    "✨ Kerakli qism avtomatik aniqlandi (pastda ko'k "
+                                    "chegara bilan belgilangan). Kerak bo'lsa chegarani "
+                                    "qo'lda sudrab tuzating, so'ng 'Shu ko'rinishda "
+                                    "saqlash' tugmasini bosing:"
+                                )
+                            else:
+                                st.caption(
+                                    "Kerakli qismini chegaralarni sudrab tanlang, "
+                                    "keyin pastdagi 'Shu ko'rinishda saqlash' tugmasini bosing:"
+                                )
+
                             if _CROPPER_AVAILABLE:
                                 default_coords = None
                                 if auto_box:
                                     ax0, ay0, ax1, ay1 = auto_box
+                                    # streamlit-cropper eski/yangi versiyalarida
+                                    # default_coords format tartibi farq qilishi
+                                    # mumkin - shuning uchun xato chiqsa,
+                                    # parametrsiz (butun rasm) holatga qaytamiz.
                                     default_coords = (ax0, ax1, ay0, ay1)
 
                                 try:
@@ -452,12 +507,25 @@ def main():
                                         return_type="box",
                                         key=f"cropper_{i}",
                                     )
+                                # streamlit-cropper "box" qiymatlarini ORIGINAL rasm
+                                # o'lchamiga moslab (ekranga moslab kichraytirilgan
+                                # bo'lsa ham) avtomatik qaytaradi, shuning uchun
+                                # qo'shimcha masshtablash shart emas.
                                 left = preview_crop["left"]
                                 top = preview_crop["top"]
                                 right = left + preview_crop["width"]
                                 bottom = top + preview_crop["height"]
                                 preview_img = orig_img.crop((left, top, right, bottom))
                             else:
+                                # Zaxira variant: streamlit-cropper o'rnatilmagan bo'lsa,
+                                # slayder orqali chegara belgilab kesish. Slayderlarning
+                                # boshlang'ich qiymati ham avtomatik aniqlangan hududga
+                                # o'rnatiladi (topilgan bo'lsa).
+                                st.caption(
+                                    "⚠️ Aniqroq (sichqoncha bilan) kesish uchun "
+                                    "`pip install streamlit-cropper` kerak. Hozircha "
+                                    "slayder orqali kesish mumkin:"
+                                )
                                 w, h = orig_img.size
                                 if auto_box:
                                     ax0, ay0, ax1, ay1 = auto_box
@@ -501,38 +569,47 @@ def main():
             correct_key = f"correct_{i}"
             current_options = st.session_state[opts_key]
 
-            st.caption("🔘 To'g'ri javobni belgilash uchun bosing • 🗑️ variantni o'chiradi")
+            # "edit.html" uslubi: har bir variant o'z qatorida - chap tomonda
+            # A/B/C/D belgi-tugma (bosilsa o'sha variant TO'G'RI javob bo'ladi
+            # va yashil rangga o'tadi), o'rtada tahrirlanadigan matn, ENG
+            # O'NGDA (qatorning oxirida) o'chirish (✕) tugmasi - xuddi
+            # edit.html'dagi kabi. Har bir variant BARQAROR id orqali
+            # kuzatilgani uchun (yuqoriga qarang) - biror variantni o'chirish
+            # boshqa qatorlarning matnini yoki holatini HECH QACHON
+            # "surib" yubormaydi, faqat o'sha bitta qator yo'qoladi.
+            st.caption("🔘 To'g'ri javobni belgilash uchun doirani bosing • ✕ variantni o'chiradi")
             edited_options = []
             for j, opt in enumerate(current_options):
                 opt_id = opt["id"]
                 is_correct = (st.session_state[correct_key] == opt_id)
-
-                val = st.text_area(
-                    f"Variant {chr(65 + j)}",
-                    value=opt["text"],
-                    key=f"opt_{i}_{opt_id}",
-                    label_visibility="collapsed",
-                    placeholder=f"Variant {chr(65 + j)}",
-                    height=68,
-                )
-                edited_options.append(val)
-
-                col_lbl, col_del, col_spacer = st.columns([1, 1, 10])
+                col_lbl, col_opt, col_del = st.columns([1, 8, 1], vertical_alignment="center")
                 with col_lbl:
-                    lbl_emoji = "✅" if is_correct else "⚪"
+                    lbl_type = "primary" if is_correct else "secondary"
                     if st.button(
-                        lbl_emoji,
+                        " ",
                         key=f"setok_{i}_{opt_id}",
+                        type=lbl_type,
+                        use_container_width=True,
                         help="To'g'ri javob sifatida belgilash",
                     ):
                         st.session_state[correct_key] = opt_id
                         st.rerun()
+                with col_opt:
+                    val = st.text_input(
+                        f"Variant {chr(65 + j)}",
+                        value=opt["text"],
+                        key=f"opt_{i}_{opt_id}",
+                        label_visibility="collapsed",
+                        placeholder=f"Variant {chr(65 + j)}",
+                    )
+                    edited_options.append(val)
                 with col_del:
                     st.button(
-                        "🗑️", key=f"del_{i}_{opt_id}",
+                        "✕", key=f"del_{i}_{opt_id}",
                         help=f"{chr(65 + j)} variantni o'chirish",
                         on_click=_remove_option, args=(i, opt_id),
                         disabled=len(current_options) <= 2,
+                        use_container_width=True,
                     )
 
             st.button(
@@ -542,6 +619,9 @@ def main():
                 disabled=len(current_options) >= 8,
             )
 
+            # correct_key variant ID sifatida saqlanadi - Word fayl uchun
+            # esa yakuniy INDEX kerak, shuning uchun joriy tartibga qarab
+            # id'ni indexga aylantiramiz.
             correct_id = st.session_state[correct_key]
             chosen = next(
                 (idx for idx, opt in enumerate(current_options) if opt["id"] == correct_id),
@@ -552,6 +632,8 @@ def main():
                 "question": question_text,
                 "options": edited_options,
                 "correct_index": chosen,
+                # Foydalanuvchi tanlagan/kesgan yakuniy rasm (yoki checkbox
+                # o'chirilgan bo'lsa - None, ya'ni Word faylga rasm qo'shilmaydi)
                 "image_b64": final_image_b64,
             })
 
