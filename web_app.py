@@ -204,6 +204,19 @@ div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data
   width: 34px !important; height: 34px !important; min-width: 34px !important;
   border-radius: 10px !important; padding: 0 !important;
 }
+
+/* Qo'lda kesish (streamlit-cropper) uchun xavfsizlik to'sig'i: rasmni
+   oldindan kichraytirsak ham, ba'zi qurilmalarda kesish maydoni bir
+   necha piksel tashqariga chiqishi mumkin - shu qoida uni har doim
+   ekran/konteyner kengligiga qat'iy cheklaydi va gorizontal scrollni
+   yashiradi, shunda o'ng tomon "kesilib" ko'rinmay qolmaydi. */
+.main .block-container { overflow-x: hidden !important; }
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) { overflow-x: hidden !important; }
+img[alt="Cropper"], div:has(> img[alt="Cropper"]) {
+  max-width: 100% !important;
+  width: 100% !important;
+  height: auto !important;
+}
 </style>
 """
 st.markdown(_CARD_CSS, unsafe_allow_html=True)
@@ -518,15 +531,54 @@ def main():
                                     default_coords = (ax0, ax1, ay0, ay1)
 
                                 try:
+                                    # streamlit-cropper katta (masalan, telefon
+                                    # kamerasidan olingan 3000px+) rasmni to'g'ridan-
+                                    # to'g'ri qabul qilganda, ba'zan uning ichki
+                                    # kenglik-hisoblashi tor (mobil) ekranga to'g'ri
+                                    # moslashmay, kesish maydoni o'ngga tashqariga
+                                    # chiqib ketadi. Buning oldini olish uchun
+                                    # cropper'ga har doim kichraytirilgan nusxa
+                                    # beramiz, keyin tanlangan koordinatalarni
+                                    # asl o'lchamga qaytarib masshtablaymiz - shunda
+                                    # ekranga har doim sig'adi, natija sifati esa
+                                    # (original piksellarda kesiladi) pasaymaydi.
+                                    _CROP_DISPLAY_MAX_W = 700
+                                    ow, oh = orig_img.size
+                                    if ow > _CROP_DISPLAY_MAX_W:
+                                        _scale = _CROP_DISPLAY_MAX_W / ow
+                                        display_img = orig_img.resize(
+                                            (_CROP_DISPLAY_MAX_W, max(1, round(oh * _scale)))
+                                        )
+                                    else:
+                                        _scale = 1.0
+                                        display_img = orig_img
+
+                                    display_default_coords = None
+                                    if default_coords is not None:
+                                        dx0, dx1, dy0, dy1 = default_coords
+                                        display_default_coords = (
+                                            round(dx0 * _scale), round(dx1 * _scale),
+                                            round(dy0 * _scale), round(dy1 * _scale),
+                                        )
+
                                     preview_crop = st_cropper(
-                                        orig_img,
+                                        display_img,
                                         realtime_update=True,
                                         box_color="#FF4B4B",
                                         aspect_ratio=None,
                                         return_type="box",
-                                        default_coords=default_coords,
+                                        default_coords=display_default_coords,
                                         key=f"cropper_{i}",
                                     )
+                                    # Kichraytirilgan nusxada tanlangan koordinatalarni
+                                    # asl (to'liq o'lchamdagi) rasmga qaytarib
+                                    # masshtablaymiz.
+                                    preview_crop = {
+                                        "left": round(preview_crop["left"] / _scale),
+                                        "top": round(preview_crop["top"] / _scale),
+                                        "width": round(preview_crop["width"] / _scale),
+                                        "height": round(preview_crop["height"] / _scale),
+                                    }
                                 except Exception:
                                     preview_crop = st_cropper(
                                         orig_img,
