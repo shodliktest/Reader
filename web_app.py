@@ -168,6 +168,34 @@ div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div
   padding-top: 0.35rem !important;
 }
 
+/* Tugma atrofidagi barcha Streamlit "wrapper" qatlamlarini (katta oq quti hosil qiluvchi
+   default padding/border) yo'qotish — birinchi va oxirgi ustunlarda */
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type,
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type {
+  display: flex !important;
+  align-items: flex-start !important;
+  justify-content: center !important;
+}
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stVerticalBlock"],
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stVerticalBlock"],
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stElementContainer"],
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stElementContainer"],
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stButton"],
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stButton"] {
+  width: 26px !important;
+  min-width: 26px !important;
+  max-width: 26px !important;
+  height: 26px !important;
+  min-height: 26px !important;
+  max-height: 26px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  gap: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
 /* 1. To'g'ri javob belgilash tugmasi (emoji, maksimal kichik) */
 div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
   width: 26px !important; 
