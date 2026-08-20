@@ -138,75 +138,83 @@ hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 
 /* ------------------------------------------------------------------ */
 /* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi QAT'IY BIR QATORDA */
 /* ------------------------------------------------------------------ */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) {
   display: flex !important;
   flex-direction: row !important;
   flex-wrap: nowrap !important;
-  align-items: center !important;
-  gap: 0.4rem !important;
+  align-items: flex-start !important;
+  gap: 0.35rem !important;
   width: 100% !important;
   box-sizing: border-box !important;
 }
 
 /* Ustunlarga qat'iy cheklov (ekranni kengaytirib yubormaydi) */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:first-of-type {
-  flex: 0 0 32px !important;
-  width: 32px !important;
-  min-width: 32px !important;
-  max-width: 32px !important;
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:first-of-type {
+  flex: 0 0 18px !important;
+  width: 18px !important;
+  min-width: 18px !important;
+  max-width: 18px !important;
+  padding-top: 0.35rem !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
   flex: 1 1 auto !important;
   min-width: 0 !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) > div[data-testid="column"]:last-of-type {
-  flex: 0 0 32px !important;
-  width: 32px !important;
-  min-width: 32px !important;
-  max-width: 32px !important;
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:last-of-type {
+  flex: 0 0 18px !important;
+  width: 18px !important;
+  min-width: 18px !important;
+  max-width: 18px !important;
+  padding-top: 0.35rem !important;
 }
 
-/* 1. Qora yumaloq to'g'ri javob belgilash tugmasi (Katta bo'lib ketishining oldi olindi) */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
-  width: 28px !important; 
-  height: 28px !important; 
-  min-width: 28px !important; 
-  max-width: 28px !important;
-  min-height: 28px !important;
-  max-height: 28px !important;
+/* 1. Qora yumaloq to'g'ri javob belgilash tugmasi (maksimal kichik) */
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
+  width: 16px !important; 
+  height: 16px !important; 
+  min-width: 16px !important; 
+  max-width: 16px !important;
+  min-height: 16px !important;
+  max-height: 16px !important;
   border-radius: 50% !important; 
   padding: 0 !important;
   margin: 0 !important;
   font-size: 0 !important;
-  border: 2px solid var(--tp-accent) !important;
+  border: 1.5px solid var(--tp-accent) !important;
   background: #fff !important;
   box-shadow: none !important;
 }
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
-  box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 20px var(--tp-accent) !important;
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button[kind="primary"] {
+  box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 12px var(--tp-accent) !important;
 }
 
-/* 2. Input (Matn) maydoni dizayni */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) input {
+/* 2. Matn maydoni dizayni (endi textarea - uzun matn 2-qatorga tushadi) */
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) textarea {
   border-radius: 10px !important;
   background-color: #F8F9FA !important;
   border: 1px solid var(--tp-border) !important;
   padding: 0.4rem 0.6rem !important;
   width: 100% !important;
   box-sizing: border-box !important;
+  resize: none !important;
+  min-height: 2.6rem !important;
+  line-height: 1.3 !important;
+  overflow-y: hidden !important;
 }
 
-/* 3. X o'chirish tugmasi (Katta bo'lib ketishining oldi olindi va qat'iy cheklandi) */
-div[data-testid="stHorizontalBlock"]:has(input[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
-  width: 30px !important; 
-  height: 30px !important; 
-  min-width: 30px !important; 
-  max-width: 30px !important;
-  min-height: 30px !important;
-  max-height: 30px !important;
-  border-radius: 8px !important; 
+/* 3. X o'chirish tugmasi (maksimal kichik) */
+div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
+  width: 18px !important; 
+  height: 18px !important; 
+  min-width: 18px !important; 
+  max-width: 18px !important;
+  min-height: 18px !important;
+  max-height: 18px !important;
+  border-radius: 6px !important; 
   padding: 0 !important;
   margin: 0 !important;
+  font-size: 0.6rem !important;
+  line-height: 1 !important;
   background-color: #F3E8FF !important;
   color: #6B21A8 !important;
   border: none !important;
@@ -531,12 +539,13 @@ def main():
                         st.session_state[correct_key] = opt_id
                         st.rerun()
                 with col_opt:
-                    val = st.text_input(
+                    val = st.text_area(
                         f"Variant {chr(65 + j)}",
                         value=opt["text"],
                         key=f"opt_{i}_{opt_id}",
                         label_visibility="collapsed",
                         placeholder=f"Variant {chr(65 + j)}",
+                        height=68,
                     )
                     edited_options.append(val)
                 with col_del:
