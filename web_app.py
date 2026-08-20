@@ -74,6 +74,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 st.set_page_config(page_title="Test natijalarini tekshirish", layout="centered")
 
 # --- "edit.html" (TestPro) uslubidagi karta-asosli dizayn va RESPONSIV CSS ---
+# Bug keltirib chiqaruvchi murakkab :has selektorlari olib tashlandi
 _CARD_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Unbounded:wght@700;800;900&display=swap');
@@ -134,121 +135,6 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 .tp-badge.warn { border-color: rgba(245,158,11,0.35); color: #D97706; background: rgba(245,158,11,0.08); }
 
 hr.tp-sep { border: none; border-top: 1px solid var(--tp-border); margin: .6rem 0; }
-
-/* ------------------------------------------------------------------ */
-/* VARIANT QATORI: radio-doira + matn + o'chirish tugmasi QAT'IY BIR QATORDA */
-/* ------------------------------------------------------------------ */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) {
-  display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  align-items: flex-start !important;
-  gap: 0.35rem !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-}
-
-/* Ustunlarga qat'iy cheklov (ekranni kengaytirib yubormaydi) */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:first-of-type {
-  flex: 0 0 30px !important;
-  width: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
-  padding-top: 0.35rem !important;
-}
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:nth-child(2) {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-}
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) > div[data-testid="column"]:last-of-type {
-  flex: 0 0 30px !important;
-  width: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
-  padding-top: 0.35rem !important;
-}
-
-/* Tugma atrofidagi barcha Streamlit "wrapper" qatlamlarini (katta oq quti hosil qiluvchi
-   default padding/border) yo'qotish — birinchi va oxirgi ustunlarda */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type,
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type {
-  display: flex !important;
-  align-items: flex-start !important;
-  justify-content: center !important;
-}
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stVerticalBlock"],
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stVerticalBlock"],
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stElementContainer"],
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stElementContainer"],
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type div[data-testid="stButton"],
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type div[data-testid="stButton"] {
-  width: 26px !important;
-  min-width: 26px !important;
-  max-width: 26px !important;
-  height: 26px !important;
-  min-height: 26px !important;
-  max-height: 26px !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  gap: 0 !important;
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-
-/* 1. To'g'ri javob belgilash tugmasi (emoji, maksimal kichik) */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:first-of-type button {
-  width: 26px !important; 
-  height: 26px !important; 
-  min-width: 26px !important; 
-  max-width: 26px !important;
-  min-height: 26px !important;
-  max-height: 26px !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  font-size: 0.85rem !important;
-  line-height: 1 !important;
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
-
-/* 2. Matn maydoni dizayni (textarea - uzun matn qatorlarga tushadi) */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) textarea {
-  border-radius: 10px !important;
-  background-color: #F8F9FA !important;
-  border: 1px solid var(--tp-border) !important;
-  padding: 0.4rem 0.6rem !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  resize: none !important;
-  min-height: 2.6rem !important;
-  line-height: 1.3 !important;
-  overflow-y: hidden !important;
-}
-
-/* 3. O'chirish tugmasi (emoji, maksimal kichik) */
-div[data-testid="stHorizontalBlock"]:has(textarea[placeholder^="Variant"]) [data-testid="column"]:last-of-type button {
-  width: 26px !important; 
-  height: 26px !important; 
-  min-width: 26px !important; 
-  max-width: 26px !important;
-  min-height: 26px !important;
-  max-height: 26px !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  font-size: 0.8rem !important;
-  line-height: 1 !important;
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
 </style>
 """
 st.markdown(_CARD_CSS, unsafe_allow_html=True)
@@ -550,16 +436,22 @@ def main():
 
             st.caption("🔘 To'g'ri javobni belgilash uchun doirani bosing • ✕ variantni o'chiradi")
             edited_options = []
+            
+            # --- ASOSIY O'ZGARISH SHU YERDA: Ustunlar masofasi va type="tertiary" ---
             for j, opt in enumerate(current_options):
                 opt_id = opt["id"]
                 is_correct = (st.session_state[correct_key] == opt_id)
-                col_lbl, col_opt, col_del = st.columns([1, 24, 1], vertical_alignment="center")
+                
+                # Masofani kichik qilib (gap="small"), ustunlar nisbatini to'g'riladik
+                col_lbl, col_opt, col_del = st.columns([1.5, 10, 1.5], gap="small", vertical_alignment="center")
+                
                 with col_lbl:
                     lbl_emoji = "✅" if is_correct else "⚪"
                     if st.button(
                         lbl_emoji,
                         key=f"setok_{i}_{opt_id}",
                         help="To'g'ri javob sifatida belgilash",
+                        type="tertiary" # Konteynerni olib tashlaydi!
                     ):
                         st.session_state[correct_key] = opt_id
                         st.rerun()
@@ -579,6 +471,7 @@ def main():
                         help=f"{chr(65 + j)} variantni o'chirish",
                         on_click=_remove_option, args=(i, opt_id),
                         disabled=len(current_options) <= 2,
+                        type="tertiary" # Konteynerni olib tashlaydi!
                     )
 
             st.button(
