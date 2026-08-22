@@ -16,6 +16,10 @@ Chaqiruvchi kodlar uchun asosiy funksiya: process_single_image()
 import os
 import re
 import json
+import time
+import base64
+import io
+import threading
 import platform
 import pytesseract
 import numpy as np
@@ -43,6 +47,29 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 GROQ_MODEL = 'openai/gpt-oss-120b'
 
 _groq_client = None
+_groq_rate_lock = threading.Lock()
+_groq_last_call_time = 0.0
+# Groq bepul rejasi 30 RPM (daqiqada 30 so'rov) bilan cheklangan. Bitta
+# test-rasmi uchun savol + har bir variant alohida-alohida chaqiriladi,
+# shuning uchun ketma-ket bir necha rasm tez yuborilsa, chaqiruvlar bir
+# necha soniya ichida limitdan oshib, 429 (Too Many Requests) qaytaradi.
+# Bu holatda Groq SDK avtomatik qayta uraynadi, lekin har bir urinish
+# push-back kutish vaqtini qo'shadi va umumiy ishlash sekinlashadi.
+# Chaqiruvlar orasiga ~1.3 soniyalik minimal oraliq qo'yish (taxminan
+# 46 so'rov/daqiqa "shift"i o'rniga, xavfsizlik zaxirasi bilan 30 dan
+# pastroq amaliy tezlikda) 429 xatolarining aksariyatini oldindan
+# oldini oladi.
+_GROQ_MIN_INTERVAL = 1.3
+
+
+def _groq_throttle():
+    global _groq_last_call_time
+    with _groq_rate_lock:
+        now = time.monotonic()
+        wait = _GROQ_MIN_INTERVAL - (now - _groq_last_call_time)
+        if wait > 0:
+            time.sleep(wait)
+        _groq_last_call_time = time.monotonic()
 
 
 def get_groq_client():
@@ -82,12 +109,165 @@ Vazifang:
 3. Faqat tozalangan variant matnini qaytar - boshqa hech qanday izoh yoki belgi qo'shma."""
 
 
+GROQ_BATCH_PROMPT = """Sen O'zbek tilidagi haydovchilik test savoli va uning javob variantlarini
+OCR xatolaridan tozalaydigan yordamchisan. Senga Tesseract OCR orqali telefon skrinshotidan
+o'qilgan, xatolarga to'la XOM matnlar JSON massiv ko'rinishida beriladi: birinchi element -
+savol matni, undan keyingilari - javob variantlari (ba'zilari boshida "F1", "F2" kabi
+variant-belgisi bilan boshlangan bo'lishi mumkin).
+
+Vazifang har bir element uchun:
+1. OCR xatolarini tuzat (harf almashinuvi, ortiqcha bo'sh joy, noto'g'ri belgilar), matnning
+   MA'NOSINI o'zgartirma, hech narsa qo'shma yoki ayirma.
+2. Savol matnida (faqat 1-elementda): oxirida yoki boshida ikonka/rasmdan chiqqan mazmunsiz
+   harf-belgi chalajimchalari bo'lsa, ularni olib tashla - lekin savolning haqiqiy oxirgi
+   so'zlarini hech qachon o'chirma.
+3. Variant matnlarida (2-elementdan boshlab): boshidagi variant-belgisini (F1, F2, F3, F4, F,
+   yoki OCR buzib yuborgan shunga o'xshash belgi/raqam, undan keyingi | . ) kabi tinish
+   belgilari bilan birga) olib tashla.
+
+Natijani FAQAT quyidagi JSON formatida qaytar, boshqa hech qanday izoh yoki matn qo'shma:
+{"cleaned": ["<tuzatilgan 1-element>", "<tuzatilgan 2-element>", ...]}
+Massiv uzunligi va tartibi kiruvchi massiv bilan AYNAN bir xil bo'lishi shart."""
+
+
+GROQ_VISION_MODEL = 'qwen/qwen3.6-27b'
+
+GROQ_VISION_BATCH_PROMPT = """Sen O'zbek tilidagi haydovchilik test savoli va uning javob
+variantlarini OCR xatolaridan tozalaydigan yordamchisan.
+
+Senga ikki narsa beriladi:
+1. Rasm - test savolining skrinshoti (savol matni + rangli quti ichidagi javob variantlari).
+2. JSON massiv - Tesseract OCR orqali o'sha rasmdan avtomatik o'qilgan, xatolarga to'la XOM
+   matnlar: birinchi element savol matni, undan keyingilari javob variantlari (ba'zilari
+   boshida "F1", "F2" kabi variant-belgisi bilan boshlangan bo'lishi mumkin).
+
+Vazifang: RASMGA QARAB, har bir OCR elementini tuzat:
+1. Rasmdagi haqiqiy matn bilan solishtirib, OCR xatolarini tuzat (harf almashinuvi, ortiqcha
+   bo'sh joy, noto'g'ri belgilar). Matnning MA'NOSINI o'zgartirma, hech narsa qo'shma/ayirma.
+2. Savol matnida (1-element): oxiri/boshidagi ikonka-shovqin bo'lsa olib tashla, lekin
+   haqiqiy oxirgi so'zlarni hech qachon o'chirma.
+3. Variant matnlarida (2-elementdan boshlab): boshidagi variant-belgisini (F1, F2, F3, F4,
+   yoki shunga o'xshash) tinish belgilari bilan birga olib tashla.
+4. AGAR biror element uchun rasmdagi mos matnni ANIQ o'qib bo'lmasa (juda xira, qisman
+   yopilgan, yoki OCR matni bilan rasm butunlay mos kelmasa) - o'sha element uchun hech
+   qanday taxminiy yoki uzr-matn YOZMA, o'rniga JSON massivda shu o'rinni aynan `null`
+   (JSON null qiymati, matn emas) qilib qo'y.
+
+Natijani FAQAT quyidagi JSON formatida qaytar, boshqa hech qanday izoh yoki matn qo'shma:
+{"cleaned": ["<tuzatilgan yoki null>", "<tuzatilgan yoki null>", ...]}
+Massiv uzunligi va tartibi kiruvchi massiv bilan AYNAN bir xil bo'lishi shart."""
+
+
+def _pil_to_data_url(pil_img, max_dim=900):
+    """PIL rasmni Groq vizion API kutgan base64 data-URL formatiga o'giradi.
+    Token sarfini kamaytirish uchun rasm oldindan max_dim gacha kichraytiriladi."""
+    img = pil_img
+    if img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+    w, h = img.size
+    if max(w, h) > max_dim:
+        scale = max_dim / max(w, h)
+        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))))
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    encoded = base64.b64encode(buf.getvalue()).decode('ascii')
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def groq_clean_batch_vision(pil_img, question_text, option_texts):
+    """groq_clean_batch bilan bir xil, lekin OCR matnlari bilan birga rasmning
+    o'zini ham yuboradi - shunda model xato/tushunarsiz OCR natijasini rasmga
+    qarab tuzatishi mumkin. Model biror elementni aniq o'qiy olmasa, o'sha
+    o'rinda `null` qaytaradi (o'zbekcha/inglizcha "tushunmadim" gapini emas) -
+    bu chaqiruvchi kodda alohida aniqlanadi va log'ga yoziladi, lekin hech
+    qachon savol/variant matni sifatida saqlanmaydi. Muvaffaqiyatsiz bo'lsa
+    (tarmoq xatosi, JSON buzuq va h.k.) None qaytaradi."""
+    client = get_groq_client()
+    items = [question_text] + list(option_texts)
+    if client is None or not any(t.strip() for t in items):
+        return None
+    try:
+        _groq_throttle()
+        data_url = _pil_to_data_url(pil_img)
+        response = client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            messages=[
+                {"role": "system", "content": GROQ_VISION_BATCH_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": json.dumps(items, ensure_ascii=False)},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            temperature=0,
+            max_tokens=1500,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        parsed = json.loads(raw)
+        cleaned = parsed.get("cleaned")
+        if not isinstance(cleaned, list) or len(cleaned) != len(items):
+            print(f"[Groq vizion] natija uzunligi mos kelmadi: {raw[:200]}")
+            return None
+        result = []
+        for idx, c in enumerate(cleaned):
+            if c is None:
+                label = "savol" if idx == 0 else f"variant #{idx}"
+                print(f"[Groq vizion] {label} uchun rasmdan aniq matn o'qib bo'lmadi - xom OCR matni ishlatiladi")
+                result.append(None)
+            elif isinstance(c, str):
+                result.append(c.strip())
+            else:
+                result.append(None)
+        return result
+    except Exception as e:
+        print(f"[Groq xatosi - vision batch] model={GROQ_VISION_MODEL}: {e}")
+        return None
+
+
+def groq_clean_batch(question_text, option_texts):
+    """Savol matni va barcha variant matnlarini BITTA Groq chaqiruvida birga
+    tozalaydi (alohida-alohida emas). Bu bitta rasm uchun ~4-5 ta so'rovni
+    bitta so'rovga tushirib, bepul rejadagi 30 RPM chegarasiga tez-tez
+    urilib qolishning oldini oladi. Muvaffaqiyatsiz bo'lsa (yoki natija soni
+    mos kelmasa) None qaytaradi - chaqiruvchi kod bunda xom matnlarga
+    qaytishi kerak."""
+    client = get_groq_client()
+    items = [question_text] + list(option_texts)
+    if client is None or not any(t.strip() for t in items):
+        return None
+    try:
+        _groq_throttle()
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": GROQ_BATCH_PROMPT},
+                {"role": "user", "content": json.dumps(items, ensure_ascii=False)},
+            ],
+            temperature=0,
+            max_tokens=1500,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        parsed = json.loads(raw)
+        cleaned = parsed.get("cleaned")
+        if not isinstance(cleaned, list) or len(cleaned) != len(items):
+            return None
+        return [c.strip() if isinstance(c, str) else "" for c in cleaned]
+    except Exception as e:
+        print(f"[Groq xatosi - batch] model={GROQ_MODEL}: {e}")
+        return None
+
+
 def _groq_clean_text(text, system_prompt):
     """Berilgan xom matnni Groq API orqali tozalaydi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
     client = get_groq_client()
     if client is None or not text.strip():
         return None
     try:
+        _groq_throttle()
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
@@ -249,8 +429,6 @@ BORDER_COLOR_RANGES_HSV = [
     (85, 100, 60, 120),
 ]
 
-PHOTO_SATURATION_THRESHOLD = 15
-
 
 def detect_photo_region(pil_img):
     """Rasmdan rangli ramka bilan o'ralgan "chinakam foto" qismini avtomatik
@@ -295,28 +473,18 @@ def detect_photo_region(pil_img):
         if inner_x1 <= inner_x0 or inner_y1 <= inner_y0:
             return None
 
-        inner = arr[inner_y0:inner_y1, inner_x0:inner_x1]
-        inner_hsv = cv2.cvtColor(inner, cv2.COLOR_RGB2HSV)
-        inner_sat = inner_hsv[..., 1]
-        row_sat = inner_sat.mean(axis=1)
-
-        content_rows = np.where(row_sat > PHOTO_SATURATION_THRESHOLD)[0]
-        if len(content_rows) == 0:
-            # To'yinganlik past (masalan qora-oq chizma/diagramma) - butun
-            # ramka ichini "foto" deb hisoblaymiz
-            return (inner_x0, inner_y0, inner_x1, inner_y1)
-
-        top_offset = int(content_rows[0])
-        bottom_offset = int(content_rows[-1])
-
-        final_y0 = inner_y0 + top_offset
-        final_y1 = inner_y0 + bottom_offset
-
-        # Juda kichik natija chiqsa (masalan xato-detekt) - ishonchsiz deb hisoblaymiz
-        if final_y1 - final_y0 < 60:
-            return (inner_x0, inner_y0, inner_x1, inner_y1)
-
-        return (inner_x0, final_y0, inner_x1, final_y1)
+        # ESLATMA: avval bu yerda ramka ichidagi "to'yinganlik" (saturation)ga
+        # qarab qatorlarni kesib tashlaydigan qo'shimcha tekshiruv bor edi -
+        # ya'ni faqat rangga boy (to'yingan) piksellar joylashgan qatorlar
+        # "chinakam foto" deb hisoblanardi. Bu noto'g'ri edi: agar rasmning
+        # katta qismi tabiiy ravishda kam to'yingan bo'lsa (asfalt, osmon,
+        # kulrang mashina/bino) va faqat bitta kichik element (masalan
+        # markazdagi qizil mashina yoki sariq chiroq) yorqin rangli bo'lsa,
+        # algoritm butun kerakli rasm o'rniga FAQAT o'sha kichik elementni
+        # qirqib olardi. Rangli tashqi ramkaning o'zi allaqachon to'g'ri
+        # chegarani bildiradi, shuning uchun endi unga to'g'ridan-to'g'ri
+        # ishonamiz - qo'shimcha "kontent" heuristikasi qo'llanmaydi.
+        return (inner_x0, inner_y0, inner_x1, inner_y1)
     except Exception:
         return None
 
@@ -425,27 +593,53 @@ def process_single_image(pil_img, use_groq=True):
         question_text_clean = clean_ocr_text(question_raw)
         question_text = ' '.join(question_text_clean.split())
 
-        final_question = question_text
-        if use_groq and question_text:
-            groq_question = groq_clean_question(question_text)
-            final_question = groq_question or question_text
-
-        options = []
-        correct_index = None
+        # Avval barcha xom OCR matnlarini (savol + har bir variant) yig'ib
+        # olamiz, keyin ularni BITTA Groq chaqiruvida birgalikda tozalashga
+        # harakat qilamiz (RPM chegarasiga kamroq tegish uchun).
+        raw_option_texts = []
+        raw_option_is_green = []
         for y1, y2, is_green in regions:
             option_raw = ocr_region(ocr_ready_img, y1, y2, OCR_LANG, OCR_CONFIG)
             option_clean_lines = clean_ocr_text(option_raw)
             option_no_marker = VARIANT_MARKER_RE.sub('', option_clean_lines, count=1)
             option_text = ' '.join(option_no_marker.split())
-
             if not option_text:
                 continue
+            raw_option_texts.append(option_text)
+            raw_option_is_green.append(is_green)
 
-            final_option = option_text
-            if use_groq:
-                groq_option = groq_clean_option(option_text)
-                final_option = groq_option or option_text
+        final_question = question_text
+        final_option_texts = list(raw_option_texts)
 
+        if use_groq and (question_text or raw_option_texts):
+            batch_result = groq_clean_batch_vision(pil_img, question_text, raw_option_texts)
+            if batch_result is None:
+                # Vizion chaqiruv muvaffaqiyatsiz bo'ldi (masalan model hozircha
+                # mavjud emas yoki tarmoq xatosi) - matn-only batch'ga qaytamiz.
+                batch_result = groq_clean_batch(question_text, raw_option_texts)
+
+            if batch_result is not None:
+                final_question = batch_result[0] or question_text
+                final_option_texts = [
+                    cleaned or original
+                    for cleaned, original in zip(batch_result[1:], raw_option_texts)
+                ]
+            else:
+                # Batch chaqiruv muvaffaqiyatsiz bo'ldi (masalan JSON buzilgan
+                # yoki tarmoq xatosi) - eski, bittalab tozalash usuliga
+                # qaytamiz, shunda funksionallik hech qachon butunlay
+                # to'xtab qolmaydi.
+                if question_text:
+                    groq_question = groq_clean_question(question_text)
+                    final_question = groq_question or question_text
+                final_option_texts = []
+                for option_text in raw_option_texts:
+                    groq_option = groq_clean_option(option_text)
+                    final_option_texts.append(groq_option or option_text)
+
+        options = []
+        correct_index = None
+        for final_option, is_green in zip(final_option_texts, raw_option_is_green):
             # Groq tozalashdan keyin ham (yoki asl OCR natijasi) bo'sh bo'lib
             # qolgan bo'lishi mumkin - bunday "bo'sh variant"larni umuman
             # ro'yxatga qo'shmaymiz (Word faylda keraksiz bo'sh D) kabi
