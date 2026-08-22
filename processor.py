@@ -40,7 +40,7 @@ OCR_CONFIG = '--psm 6'
 
 # --- GROQ API sozlamalari ---
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
-GROQ_MODEL = 'llama-3.3-70b-versatile'
+GROQ_MODEL = 'openai/gpt-oss-120b'
 
 _groq_client = None
 
@@ -99,7 +99,8 @@ def _groq_clean_text(text, system_prompt):
         )
         cleaned = response.choices[0].message.content.strip()
         return cleaned if cleaned else None
-    except Exception:
+    except Exception as e:
+        print(f"[Groq xatosi] model={GROQ_MODEL}: {e}")
         return None
 
 
