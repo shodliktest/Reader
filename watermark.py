@@ -1,21 +1,14 @@
 """
 watermark.py
 ------------
-Word fayli ichidagi RASMLARNING O'ZIGA watermark qo'yish engine'i.
-
-Muhim:
-- DOCX sahifa layout/XML'iga tegmaydi.
-- Word ichidagi image relationship'lar va rasmning joylashuvi saqlanadi.
-- Original fayl hech qachon ustidan yozilmaydi; yangi nusxa yaratiladi.
-- Watermark faqat image pixel'lariga qo'shiladi.
+Word ichidagi RASMLARNING O'ZIGA watermark qo'yish engine'i.
+CRC-32 noto'g'ri bo'lgan DOCX media entry'larini imkon qadar tolerant o'qiydi.
 """
-
 import io
 import os
 import zipfile
-import tempfile
+import zlib
 from copy import deepcopy
-
 from PIL import Image, ImageDraw, ImageFont
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -23,33 +16,28 @@ SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff
 DEFAULT_SETTINGS = {
     "enabled": True,
     "text": "© QuizMaker Bot",
-    "style": "diagonal",          # diagonal | center | pattern
-    "opacity": 18,                 # 5..60
+    "style": "diagonal",
+    "opacity": 18,
     "angle": -35,
     "size": 30,
     "color": "#FFFFFF",
     "bold": True,
+    "font": "sans",
     "pattern_gap": 180,
+    "stroke": 0,
 }
 
+STYLE_LABELS = {
+    "diagonal": "Diagonal",
+    "center": "Markaziy",
+    "pattern": "Takrorlanuvchi",
+    "corner": "Burchak",
+    "double": "Ikki diagonal",
+    "stamp": "Stamp",
+    "outline": "Kontur",
+}
 
-def normalize_settings(settings=None):
-    out = dict(DEFAULT_SETTINGS)
-    if settings:
-        out.update({k: v for k, v in settings.items() if v is not None})
-
-    out["enabled"] = bool(out.get("enabled", True))
-    out["text"] = str(out.get("text", "© QuizMaker Bot")).strip() or "© QuizMaker Bot"
-    out["style"] = str(out.get("style", "diagonal")).lower()
-    if out["style"] not in {"diagonal", "center", "pattern"}:
-        out["style"] = "diagonal"
-    out["opacity"] = max(1, min(90, int(out.get("opacity", 18))))
-    out["angle"] = max(-180, min(180, int(out.get("angle", -35))))
-    out["size"] = max(8, min(180, int(out.get("size", 30))))
-    out["pattern_gap"] = max(60, min(500, int(out.get("pattern_gap", 180))))
-    out["color"] = _normalize_color(out.get("color", "#FFFFFF"))
-    out["bold"] = bool(out.get("bold", True))
-    return out
+FONT_LABELS = {"sans": "Sans", "serif": "Serif", "mono": "Mono"}
 
 
 def _normalize_color(value):
@@ -61,30 +49,39 @@ def _normalize_color(value):
     return "#" + value.upper()
 
 
-def _hex_rgb(hex_color):
-    c = _normalize_color(hex_color).lstrip("#")
-    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+def normalize_settings(settings=None):
+    out = dict(DEFAULT_SETTINGS)
+    if settings:
+        out.update({k: v for k, v in settings.items() if v is not None})
+    out["enabled"] = bool(out.get("enabled", True))
+    out["text"] = str(out.get("text", DEFAULT_SETTINGS["text"])).strip() or DEFAULT_SETTINGS["text"]
+    out["style"] = str(out.get("style", "diagonal")).lower()
+    if out["style"] not in STYLE_LABELS:
+        out["style"] = "diagonal"
+    out["opacity"] = max(1, min(100, int(out.get("opacity", 18))))
+    out["angle"] = max(-180, min(180, int(out.get("angle", -35))))
+    out["size"] = max(8, min(180, int(out.get("size", 30))))
+    out["pattern_gap"] = max(40, min(600, int(out.get("pattern_gap", 180))))
+    out["stroke"] = max(0, min(12, int(out.get("stroke", 0))))
+    out["color"] = _normalize_color(out.get("color", "#FFFFFF"))
+    out["bold"] = bool(out.get("bold", True))
+    out["font"] = str(out.get("font", "sans")).lower()
+    if out["font"] not in FONT_LABELS:
+        out["font"] = "sans"
+    return out
 
 
-def _font(size, bold=False):
-    candidates = []
-    if bold:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-
-    # Windows/local fallback paths
-    candidates += [
-        os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "arialbd.ttf" if bold else "arial.ttf"),
-        os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "segoeuib.ttf" if bold else "segoeui.ttf"),
+def _font(size, bold=False, family="sans"):
+    names = {
+        "sans": ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf"),
+        "serif": ("DejaVuSerif-Bold.ttf", "DejaVuSerif.ttf"),
+        "mono": ("DejaVuSansMono-Bold.ttf", "DejaVuSansMono.ttf"),
+    }
+    bold_name, regular_name = names.get(family, names["sans"])
+    candidates = [
+        f"/usr/share/fonts/truetype/dejavu/{bold_name if bold else regular_name}",
+        f"/usr/share/fonts/truetype/liberation2/{'LiberationSerif-Bold.ttf' if family=='serif' and bold else 'LiberationSerif-Regular.ttf' if family=='serif' else 'LiberationMono-Bold.ttf' if family=='mono' and bold else 'LiberationMono-Regular.ttf' if family=='mono' else 'LiberationSans-Bold.ttf' if bold else 'LiberationSans-Regular.ttf'}",
     ]
-
     for path in candidates:
         try:
             if os.path.exists(path):
@@ -94,67 +91,91 @@ def _font(size, bold=False):
     return ImageFont.load_default()
 
 
-def _text_layer(size, text, settings):
-    """Transparent layer containing one watermark text."""
-    font = _font(settings["size"], settings["bold"])
+def _text_layer(text, settings, alpha_override=None, outline=False):
+    font = _font(settings["size"], settings["bold"], settings["font"])
     dummy = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
     d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font, stroke_width=0)
-    tw = max(1, bbox[2] - bbox[0])
-    th = max(1, bbox[3] - bbox[1])
-    pad = max(8, settings["size"] // 3)
-    layer = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 0))
+    stroke = settings["stroke"] if outline else 0
+    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    tw, th = max(1, bbox[2]-bbox[0]), max(1, bbox[3]-bbox[1])
+    pad = max(12, settings["size"] // 2)
+    layer = Image.new("RGBA", (tw + pad*2, th + pad*2), (0,0,0,0))
     draw = ImageDraw.Draw(layer)
-    rgb = _hex_rgb(settings["color"])
-    alpha = int(255 * settings["opacity"] / 100)
-    draw.text((pad, pad), text, font=font, fill=(*rgb, alpha))
+    rgb = tuple(int(_normalize_color(settings["color"])[i:i+2], 16) for i in (1,3,5))
+    alpha = int(255 * (settings["opacity"] if alpha_override is None else alpha_override) / 100)
+    if outline:
+        draw.text((pad,pad), text, font=font, fill=(*rgb, alpha), stroke_width=max(1, settings["stroke"]), stroke_fill=(0,0,0,max(30, alpha//2)))
+    else:
+        draw.text((pad,pad), text, font=font, fill=(*rgb, alpha))
     return layer
 
 
+def _centered(overlay, layer, w, h, x_shift=0, y_shift=0):
+    overlay.alpha_composite(layer, ((w-layer.width)//2+x_shift, (h-layer.height)//2+y_shift))
+
+
 def apply_watermark(image, settings=None):
-    """PIL Image -> yangi PIL Image. Original image object o'zgarmaydi."""
     s = normalize_settings(settings)
-    if not s["enabled"]:
-        return image.copy()
-
     base = image.convert("RGBA")
+    if not s["enabled"] or not s["text"].strip():
+        return base.copy()
     w, h = base.size
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (w, h), (0,0,0,0))
+    style = s["style"]
 
-    if s["style"] == "center":
-        layer = _text_layer((w, h), s["text"], s)
+    if style == "center":
+        layer = _text_layer(s["text"], s)
         layer = layer.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
-        x = (w - layer.width) // 2
-        y = (h - layer.height) // 2
-        overlay.alpha_composite(layer, (x, y))
-
-    elif s["style"] == "pattern":
-        layer = _text_layer((w, h), s["text"], s)
+        _centered(overlay, layer, w, h)
+    elif style == "corner":
+        layer = _text_layer(s["text"], s)
         layer = layer.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
-        step_x = max(60, s["pattern_gap"] + layer.width // 3)
-        step_y = max(60, s["pattern_gap"] // 2 + layer.height)
-        for row, y in enumerate(range(-layer.height, h + layer.height, step_y)):
-            offset = 0 if row % 2 == 0 else step_x // 2
-            for x in range(-layer.width + offset, w + layer.width, step_x):
-                overlay.alpha_composite(layer, (x, y))
-
+        pad = max(10, s["size"]//2)
+        overlay.alpha_composite(layer, (max(0,w-layer.width-pad), max(0,h-layer.height-pad)))
+    elif style == "pattern":
+        layer = _text_layer(s["text"], s)
+        layer = layer.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
+        step_x = max(60, s["pattern_gap"] + layer.width//3)
+        step_y = max(50, s["pattern_gap"]//2 + layer.height)
+        for row, y in enumerate(range(-layer.height, h+layer.height, step_y)):
+            offset = 0 if row % 2 == 0 else step_x//2
+            for x in range(-layer.width+offset, w+layer.width, step_x):
+                overlay.alpha_composite(layer, (x,y))
+    elif style == "double":
+        layer = _text_layer(s["text"], s, alpha_override=max(1, s["opacity"]-4))
+        layer = layer.rotate(-35, expand=True, resample=Image.Resampling.BICUBIC)
+        _centered(overlay, layer, w, h, y_shift=-max(20,h//5))
+        layer2 = _text_layer(s["text"], s, alpha_override=max(1, s["opacity"]-4))
+        layer2 = layer2.rotate(35, expand=True, resample=Image.Resampling.BICUBIC)
+        _centered(overlay, layer2, w, h, y_shift=max(20,h//5))
+    elif style == "stamp":
+        layer = _text_layer(s["text"], s, outline=True)
+        pad = max(16, s["size"]//2)
+        stamp = Image.new("RGBA", (layer.width+pad*2, layer.height+pad*2), (0,0,0,0))
+        sd = ImageDraw.Draw(stamp)
+        rgb = tuple(int(_normalize_color(s["color"])[i:i+2],16) for i in (1,3,5))
+        a = int(255*s["opacity"]/100)
+        sd.rounded_rectangle((2,2,stamp.width-3,stamp.height-3), radius=max(8,s["size"]//3), outline=(*rgb,a), width=max(2,s["stroke"] or 2))
+        stamp.alpha_composite(layer, (pad,pad))
+        stamp = stamp.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
+        _centered(overlay, stamp, w, h)
+    elif style == "outline":
+        layer = _text_layer(s["text"], s, outline=True)
+        layer = layer.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
+        _centered(overlay, layer, w, h)
     else:  # diagonal
-        layer = _text_layer((w, h), s["text"], s)
+        layer = _text_layer(s["text"], s)
         layer = layer.rotate(s["angle"], expand=True, resample=Image.Resampling.BICUBIC)
-        x = (w - layer.width) // 2
-        y = (h - layer.height) // 2
-        overlay.alpha_composite(layer, (x, y))
+        _centered(overlay, layer, w, h)
 
     return Image.alpha_composite(base, overlay)
 
 
 def watermark_image_bytes(image_bytes, settings=None):
-    """Bytes -> watermarkli bytes. Rasmning pixel o'lchami saqlanadi."""
     src = Image.open(io.BytesIO(image_bytes))
+    src.load()
     fmt = (src.format or "PNG").upper()
-    mode = src.mode
     result = apply_watermark(src, settings)
-
     out = io.BytesIO()
     if fmt in {"JPEG", "JPG"}:
         result.convert("RGB").save(out, format="JPEG", quality=95, optimize=False, subsampling=0)
@@ -165,111 +186,54 @@ def watermark_image_bytes(image_bytes, settings=None):
     elif fmt in {"TIFF", "TIF"}:
         result.save(out, format="TIFF")
     else:
-        # PNG transparency va o'lchami saqlanadi.
         result.save(out, format="PNG", optimize=False)
     return out.getvalue()
 
 
 def _read_zip_entry_tolerant(zf, info):
-    """ZIP entry'ni CRC xatosiga chidamli o'qish.
-
-    Ba'zi Word fayllarida media entry'ning CRC qiymati noto'g'ri bo'ladi,
-    lekin compressed data o'zi to'liq va o'qiladigan bo'lishi mumkin.
-    Python zipfile odatda bunday entry'ni `Bad CRC-32` bilan rad etadi.
-    Shu holatda faqat CRC tekshiruvini vaqtincha o'chirib, data'ni
-    dekompressiya qilamiz. Bu original ZIP'ni o'zgartirmaydi.
-    """
     try:
-        return zf.read(info)
+        return zf.read(info), False
     except (zipfile.BadZipFile, RuntimeError, EOFError) as first_error:
-        # ZipExtFile CRC tekshiruvini info.CRC orqali amalga oshiradi.
-        # Nusxada CRC=None qilish check'ni o'chiradi, lekin compression,
-        # offset va boshqa ZIP metadata'lari saqlanib qoladi.
         tolerant_info = deepcopy(info)
         tolerant_info.CRC = None
         try:
             with zf.open(tolerant_info, "r") as fp:
-                return fp.read()
+                return fp.read(), True
         except Exception:
             raise first_error
 
 
 def watermark_docx(input_path, output_path, settings=None):
-    """Existing DOCX ichidagi word/media/* rasmlariga watermark qo'yadi.
-
-    CRC xatosi bo'lgan Word rasmlarini ham imkon qadar o'qiydi. Agar entry
-    compressed data'si o'qiladigan bo'lsa, yangi DOCX qayta yig'ilganda CRC
-    avtomatik ravishda to'g'ri hisoblanadi. Shuning uchun `image14.jpeg` kabi
-    bitta nosoz CRC butun Word faylini yiqitmaydi.
-
-    ZIP entry'lar va document XML o'z holicha qoladi; faqat rasm bytes'lari
-    almashtiriladi. input_path hech qachon yozilmaydi.
-    """
     s = normalize_settings(settings)
     if not s["enabled"]:
         with open(input_path, "rb") as src, open(output_path, "wb") as dst:
             dst.write(src.read())
         return output_path, 0
-
-    changed = 0
-    repaired = 0
+    changed = repaired = 0
     failed_media = []
-
-    with zipfile.ZipFile(input_path, "r") as zin, zipfile.ZipFile(
-        output_path, "w", compression=zipfile.ZIP_DEFLATED
-    ) as zout:
+    with zipfile.ZipFile(input_path, "r") as zin, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            lower = item.filename.lower()
-            ext = os.path.splitext(lower)[1]
-
+            lower = item.filename.lower(); ext = os.path.splitext(lower)[1]
             try:
-                data = _read_zip_entry_tolerant(zin, item)
+                data, tolerant = _read_zip_entry_tolerant(zin, item)
             except Exception:
-                # Media entry bo'lsa, foydalanuvchiga keyin ko'rsatish uchun
-                # nomini saqlaymiz. Boshqa entry'lar ham o'qilmasa, DOCX
-                # strukturasi buzilmasligi uchun jarayonni to'xtatamiz.
                 if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
-                    failed_media.append(item.filename)
-                    continue
+                    failed_media.append(item.filename); continue
                 raise
-
-            # CRC xatosi bo'lgan entry tolerant usul bilan o'qilgan bo'lsa,
-            # yangi ZIP'ga yozishda CRC qayta hisoblanadi.
-            original_crc = item.CRC
-            if original_crc is not None:
-                import zlib
-                actual_crc = zlib.crc32(data) & 0xFFFFFFFF
-                if actual_crc != original_crc:
-                    repaired += 1
-
+            if tolerant and item.CRC is not None and (zlib.crc32(data)&0xffffffff) != item.CRC:
+                repaired += 1
             if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
                 try:
-                    data = watermark_image_bytes(data, s)
-                    changed += 1
+                    data = watermark_image_bytes(data, s); changed += 1
                 except Exception:
-                    # Rasm haqiqatan buzilgan bo'lsa, mavjud data'ni saqlaymiz.
-                    # Keyingi bosqichda Word fayli baribir yig'iladi.
-                    failed_media.append(item.filename)
-
-            # writestr bytes berilganda CRC/size qayta hisoblanadi.
-            # Shu bilan noto'g'ri CRC bo'lgan entry'lar ham tuzatiladi.
+                    pass
             zout.writestr(item, data)
-
-    # Moslik uchun eski API ikkita qiymat qaytaradi. Log/diagnostika kerak
-    # bo'lsa watermark_docx.last_report orqali ma'lumot olish mumkin.
-    watermark_docx.last_report = {
-        "changed": changed,
-        "repaired": repaired,
-        "failed_media": failed_media,
-    }
     return output_path, changed
 
 
-def preview_bytes(image_bytes, settings=None, max_size=(900, 650)):
-    """Preview uchun PNG bytes qaytaradi."""
-    img = Image.open(io.BytesIO(image_bytes))
+def preview_bytes(image_bytes, settings=None, max_size=(1000, 700)):
+    img = Image.open(io.BytesIO(image_bytes)); img.load()
     wm = apply_watermark(img, settings)
     wm.thumbnail(max_size, Image.Resampling.LANCZOS)
-    out = io.BytesIO()
-    wm.save(out, format="PNG")
+    out = io.BytesIO(); wm.save(out, format="PNG")
     return out.getvalue()

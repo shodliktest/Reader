@@ -60,7 +60,7 @@ from aiogram.enums import ParseMode
 import session_store
 from processor import process_single_image
 from docx_builder import build_docx
-from watermark import DEFAULT_SETTINGS, normalize_settings, watermark_docx, preview_bytes
+from watermark import DEFAULT_SETTINGS, STYLE_LABELS, FONT_LABELS, normalize_settings, watermark_docx, preview_bytes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,6 +97,11 @@ _active_sessions = {}
 _watermark_settings = {}
 _wm_text_mode = set()
 
+# Word fayllar uchun vaqtinchalik navbat: chat_id -> original DOCX ma'lumotlari.
+# Fayl yuborilganda darhol qayta ishlanmaydi; foydalanuvchi avval tugmalar orqali
+# "Tekshirish", "Preview" yoki "Watermark sozlamalari"ni tanlaydi.
+_pending_docx = {}
+
 
 def get_watermark_settings(chat_id):
     return normalize_settings(_watermark_settings.get(chat_id, DEFAULT_SETTINGS))
@@ -105,19 +110,131 @@ def get_watermark_settings(chat_id):
 def watermark_settings_keyboard(chat_id):
     s = get_watermark_settings(chat_id)
     enabled = "ON 🟢" if s["enabled"] else "OFF 🔴"
-    style_labels = {"diagonal": "Diagonal", "center": "Markaziy", "pattern": "Pattern"}
+    style = STYLE_LABELS.get(s["style"], s["style"])
+    font = FONT_LABELS.get(s["font"], s["font"])
+    text_short = s["text"] if len(s["text"]) <= 18 else s["text"][:18] + "…"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"💧 Watermark: {enabled}", callback_data="wm_toggle")],
         [
-            InlineKeyboardButton(text="✏️ Matn", callback_data="wm_text"),
-            InlineKeyboardButton(text=f"🎨 {style_labels[s['style']]}", callback_data="wm_style"),
+            InlineKeyboardButton(text=f"📝 {text_short}", callback_data="wm_text"),
+            InlineKeyboardButton(text=f"🎨 {style}", callback_data="wm_style"),
         ],
         [
             InlineKeyboardButton(text=f"👻 {s['opacity']}%", callback_data="wm_opacity"),
-            InlineKeyboardButton(text=f"📐 {s['size']}px", callback_data="wm_size"),
+            InlineKeyboardButton(text=f"🔠 {s['size']}px", callback_data="wm_size"),
         ],
+        [
+            InlineKeyboardButton(text=f"🔤 {font}", callback_data="wm_font"),
+            InlineKeyboardButton(text=f"📐 {s['angle']}°", callback_data="wm_angle"),
+        ],
+        [InlineKeyboardButton(text=f"🎨 Rang {s['color']}", callback_data="wm_color")],
         [InlineKeyboardButton(text="👁️ Preview", callback_data="wm_preview")],
     ])
+
+
+def docx_keyboard(chat_id):
+    """Yuborilgan Word fayl ostidagi boshqaruv tugmalari."""
+    s = get_watermark_settings(chat_id)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔍 Tekshirish", callback_data="docx_check"),
+            InlineKeyboardButton(text="💧 Watermark", callback_data="docx_settings"),
+        ],
+        [
+            InlineKeyboardButton(text="👁️ Preview", callback_data="docx_preview"),
+            InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel"),
+        ],
+        [InlineKeyboardButton(text=f"💧 {s['opacity']}% • {STYLE_LABELS.get(s['style'], s['style'])} • {s['text'][:20]}", callback_data="docx_settings")],
+    ])
+
+
+def _pending_docx_info(chat_id):
+    return _pending_docx.get(chat_id)
+
+
+async def _send_docx_preview(message, chat_id):
+    """Word ichidagi birinchi rasmni watermark bilan preview qiladi."""
+    pending = _pending_docx_info(chat_id)
+    if not pending:
+        await message.answer("⚠️ Avval .docx fayl yuboring.")
+        return
+    settings = get_watermark_settings(chat_id)
+    raw = pending["bytes"]
+    try:
+        # Oddiy ZIP o'qish. CRC buzilgan media uchun avval tolerant qayta yig'ish
+        # ishlatiladi; shu sabab preview ham buzilgan DOCX sabab to'xtamaydi.
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+            media = [i for i in zf.infolist() if i.filename.lower().startswith("word/media/") and os.path.splitext(i.filename)[1].lower() in VALID_IMAGE_EXT]
+            if not media:
+                await message.answer("ℹ️ Word fayl ichida preview qilish uchun rasm topilmadi.")
+                return
+            try:
+                data = zf.read(media[0])
+            except Exception:
+                # CRC xatosi bo'lsa watermark_docx tolerant oqish orqali yangi DOCX yaratadi.
+                import tempfile
+                in_path = f"/tmp/{chat_id}_preview_input.docx"
+                out_path = f"/tmp/{chat_id}_preview_fixed.docx"
+                with open(in_path, "wb") as f:
+                    f.write(raw)
+                watermark_docx(in_path, out_path, {**settings, "enabled": False})
+                with zipfile.ZipFile(out_path, "r") as fixed:
+                    names = [n for n in fixed.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in VALID_IMAGE_EXT]
+                    if not names:
+                        raise RuntimeError("Rasm topilmadi")
+                    data = fixed.read(names[0])
+                for p in (in_path, out_path):
+                    try: os.remove(p)
+                    except Exception: pass
+            out = preview_bytes(data, settings)
+            from aiogram.types import BufferedInputFile
+            await message.answer_photo(BufferedInputFile(out, filename="watermark_preview.png"), caption=(
+                f"👁️ <b>Watermark Preview</b>\n"
+                f"📝 {html.escape(settings['text'])}\n"
+                f"🎨 {STYLE_LABELS.get(settings['style'], settings['style'])}\n"
+                f"👻 Shaffoflik: {settings['opacity']}%"
+            ))
+    except Exception as e:
+        logger.exception("DOCX preview xatosi")
+        await message.answer(f"❌ Preview qilishda xatolik: {html.escape(str(e))}")
+
+
+async def _process_pending_docx(chat_id, message):
+    """Tanlangan watermark sozlamalari bilan pending DOCX ni qayta ishlaydi."""
+    pending = _pending_docx_info(chat_id)
+    if not pending:
+        await message.answer("⚠️ Word fayl topilmadi. Faylni qaytadan yuboring.")
+        return
+    settings = get_watermark_settings(chat_id)
+    if not settings["enabled"]:
+        await message.answer("ℹ️ Watermark o'chirilgan. Avval 💧 Watermark tugmasidan yoqing.", reply_markup=docx_keyboard(chat_id))
+        return
+    in_path = f"/tmp/{chat_id}_{pending['file_id']}_original.docx"
+    out_path = f"/tmp/{chat_id}_{pending['file_id']}_watermarked.docx"
+    try:
+        with open(in_path, "wb") as f:
+            f.write(pending["bytes"])
+        await message.answer("💧 Word ichidagi rasmlar tekshirilmoqda va tanlangan watermark qo'shilmoqda...")
+        _, changed = watermark_docx(in_path, out_path, settings)
+        report = getattr(watermark_docx, "last_report", {}) or {}
+        repaired = int(report.get("repaired", 0) or 0)
+        failed_media = report.get("failed_media", []) or []
+        status = [f"✅ Tekshiruv va watermark tugadi! {changed} ta rasm qayta ishlandi."]
+        if repaired:
+            status.append(f"♻️ {repaired} ta rasmning CRC muammosi tuzatildi.")
+        if failed_media:
+            status.append(f"⚠️ {len(failed_media)} ta rasmni tiklab bo'lmadi.")
+        status.append(f"🎨 Uslub: {STYLE_LABELS.get(settings['style'], settings['style'])} • 👻 {settings['opacity']}% • 📝 {html.escape(settings['text'])}")
+        await message.answer("\n".join(status), reply_markup=docx_keyboard(chat_id))
+        await message.answer_document(FSInputFile(out_path, filename=f"watermarked_{pending['filename']}"))
+    except Exception as e:
+        logger.exception("DOCX watermark xatosi")
+        await message.answer(f"❌ Word faylni qayta ishlashda xatolik: {html.escape(str(e))}", reply_markup=docx_keyboard(chat_id))
+    finally:
+        for path in (in_path, out_path):
+            try:
+                if os.path.exists(path): os.remove(path)
+            except Exception: pass
 
 
 def collecting_keyboard(count):
@@ -189,7 +306,7 @@ async def wm_toggle(callback: CallbackQuery):
 async def wm_style(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     s = get_watermark_settings(chat_id)
-    order = ["diagonal", "center", "pattern"]
+    order = ["diagonal", "center", "pattern", "corner", "double", "stamp", "outline"]
     s["style"] = order[(order.index(s["style"]) + 1) % len(order)]
     _watermark_settings[chat_id] = s
     await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
@@ -254,6 +371,41 @@ async def wm_size(callback: CallbackQuery):
     _watermark_settings[chat_id] = s
     await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
     await callback.answer(f"Hajm: {s['size']}px")
+
+
+@dp.callback_query(F.data == "wm_font")
+async def wm_font(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    order = ["sans", "serif", "mono"]
+    s["font"] = order[(order.index(s.get("font", "sans")) + 1) % len(order)]
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Shrift: {FONT_LABELS[s['font']]}")
+
+
+@dp.callback_query(F.data == "wm_angle")
+async def wm_angle(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    levels = [-45, -35, -20, 0, 20, 35, 45]
+    current = s.get("angle", -35)
+    s["angle"] = levels[(levels.index(current) + 1) % len(levels)] if current in levels else -35
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Burchak: {s['angle']}°")
+
+
+@dp.callback_query(F.data == "wm_color")
+async def wm_color(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    colors = ["#FFFFFF", "#000000", "#FFD700", "#00E5FF", "#FF4D6D", "#7CFF6B"]
+    current = s.get("color", "#FFFFFF")
+    s["color"] = colors[(colors.index(current) + 1) % len(colors)] if current in colors else colors[0]
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Rang: {s['color']}")
 
 
 @dp.callback_query(F.data == "wm_preview")
@@ -339,57 +491,36 @@ async def handle_document(message: Message):
     file_bytes = buf.getvalue()
 
     if fname.endswith('.docx'):
-        # Tayyor Word faylni sahifaga watermark emas, faqat word/media/*
-        # ichidagi rasmlarga qo'yamiz. Original faylga umuman yozilmaydi.
-        await message.answer("💧 Word ichidagi rasmlar tekshirilmoqda va watermark qo'shilmoqda...")
-        in_path = f"/tmp/{message.chat.id}_{doc.file_id}_original.docx"
-        out_path = f"/tmp/{message.chat.id}_{doc.file_id}_watermarked.docx"
+        # Word fayl uchun ham rasm yuborilgandagidek tugmalar aynan bot yuborgan
+        # Word faylining OSTIDA ko'rinadi. Foydalanuvchining original xabarini
+        # Telegram tahrirlashga ruxsat bermaydi, shuning uchun bot faylning
+        # boshqaruv tugmalari bilan o'z nusxasini yuboradi.
+        _pending_docx[chat_id] = {
+            "bytes": file_bytes,
+            "file_id": doc.file_id,
+            "filename": doc.file_name or "document.docx",
+        }
+        mirror_path = f"/tmp/{chat_id}_{doc.file_id}_pending.docx"
         try:
-            with open(in_path, "wb") as f:
+            with open(mirror_path, "wb") as f:
                 f.write(file_bytes)
-            settings = get_watermark_settings(chat_id)
-            _, changed = watermark_docx(in_path, out_path, settings)
-            report = getattr(watermark_docx, "last_report", {}) or {}
-            repaired = int(report.get("repaired", 0) or 0)
-            failed_media = report.get("failed_media", []) or []
-
-            # Birinchi rasmni preview sifatida yuborishga harakat qilamiz.
+            caption = (
+                "📄 <b>Word fayl qabul qilindi.</b>\n\n"
+                "Quyidagi tugmalardan foydalaning:\n"
+                "🔍 <b>Tekshirish</b> — rasmlarni tekshiradi va tanlangan watermarkni qo'llaydi.\n"
+                "💧 <b>Watermark</b> — yozuv, uslub, shaffoflik, hajm, shrift va rangni tanlaysiz.\n"
+                "👁️ <b>Preview</b> — natijani oldindan ko'rasiz."
+            )
+            await message.answer_document(
+                FSInputFile(mirror_path, filename=doc.file_name or "document.docx"),
+                caption=caption,
+                reply_markup=docx_keyboard(chat_id),
+            )
+        finally:
             try:
-                with zipfile.ZipFile(out_path, "r") as zf:
-                    media = [n for n in zf.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in VALID_IMAGE_EXT]
-                    if media:
-                        preview = preview_bytes(zf.read(media[0]), settings)
-                        from aiogram.types import BufferedInputFile
-                        await message.answer_photo(BufferedInputFile(preview, filename="watermark_preview.png"), caption="👁️ Watermark preview")
+                os.remove(mirror_path)
             except Exception:
                 pass
-
-            status_lines = [f"✅ Tayyor! {changed} ta rasmga watermark qo'yildi."]
-            if repaired:
-                status_lines.append(
-                    f"♻️ {repaired} ta Word media faylining CRC ma'lumoti qayta tiklandi."
-                )
-            if failed_media:
-                status_lines.append(
-                    f"⚠️ {len(failed_media)} ta rasmni o'qib bo'lmadi: "
-                    + ", ".join(os.path.basename(x) for x in failed_media[:5])
-                )
-            status_lines += [
-                "📐 Rasm o'lchami va Word'dagi joylashuvi saqlandi.",
-                "🛡️ Original fayl o'zgartirilmadi.",
-            ]
-            await message.answer("\n".join(status_lines))
-            await message.answer_document(FSInputFile(out_path, filename=f"watermarked_{doc.file_name}"))
-        except Exception as e:
-            logger.exception("DOCX watermark xatosi")
-            await message.answer(f"❌ Word faylni qayta ishlashda xatolik: {e}")
-        finally:
-            for path in (in_path, out_path):
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
 
     elif fname.endswith('.zip'):
         session_id, data = _get_or_create_session(chat_id, message.from_user.id)
@@ -427,6 +558,48 @@ async def handle_document(message: Message):
         )
     else:
         await message.answer("⚠️ Faqat rasm fayllari yoki .zip qabul qilinadi.")
+
+
+@dp.callback_query(F.data == "docx_settings")
+async def docx_settings(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    if not _pending_docx_info(chat_id):
+        await callback.answer("Word fayl topilmadi. Qaytadan yuboring.", show_alert=True)
+        return
+    await callback.message.answer(
+        "💧 <b>Word ichidagi rasmlar uchun Watermark sozlamalari</b>\n"
+        "Tanlovlar shu Word faylga qo'llanadi.",
+        reply_markup=watermark_settings_keyboard(chat_id),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "docx_preview")
+async def docx_preview(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    if not _pending_docx_info(chat_id):
+        await callback.answer("Word fayl topilmadi. Qaytadan yuboring.", show_alert=True)
+        return
+    await _send_docx_preview(callback.message, chat_id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "docx_check")
+async def docx_check(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    if not _pending_docx_info(chat_id):
+        await callback.answer("Word fayl topilmadi. Qaytadan yuboring.", show_alert=True)
+        return
+    await callback.answer("Tekshirish boshlandi...")
+    await _process_pending_docx(chat_id, callback.message)
+
+
+@dp.callback_query(F.data == "docx_cancel")
+async def docx_cancel(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    _pending_docx.pop(chat_id, None)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Word fayl bekor qilindi.")
 
 
 @dp.callback_query(F.data == "cancel")

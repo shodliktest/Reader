@@ -317,43 +317,59 @@ def main():
     filename = st.text_input("📁 Word fayl nomi", value=default_name)
 
     # ------------------------------------------------------------------
-    # RASM WATERMARK SOZLAMALARI
-    # Watermark Word sahifasiga emas, Word ichidagi rasmlarning pixel'lariga
-    # qo'llanadi. Sozlamalar Telegram botdan kelgan qiymatlar bilan boshlanadi,
-    # lekin shu sahifada ham to'liq boshqariladi.
+    # RASM WATERMARK SOZLAMALARI — to'liq boshqaruv + jonli preview
     # ------------------------------------------------------------------
     wm_initial = normalize_settings(data.get("watermark_settings", DEFAULT_SETTINGS))
     for _k, _v in wm_initial.items():
         st.session_state.setdefault(f"wm_{_k}", _v)
     st.session_state.setdefault("wm_show_preview", False)
 
-    st.subheader("💧 Rasm Watermark")
-    st.caption("Watermark faqat Word ichidagi rasmlarga qo'shiladi. Word sahifasi, matnlar va rasmning joylashuvi o'zgarmaydi.")
+    st.subheader("💧 Rasm Watermark — to'liq sozlash")
+    st.caption("Watermark Word sahifasiga emas, Word ichidagi rasmlarning O'ZIGA qo'yiladi.")
 
     wm_enabled = st.checkbox("Watermarkni yoqish", key="wm_enabled")
-    c1, c2 = st.columns(2)
+
+    preset_names = ["✏️ Maxsus matn", "© QuizMaker Bot", "QUIZMAKER", "@MyTestBot", "CONFIDENTIAL", "SAMPLE"]
+    current_text = st.session_state.get("wm_text", DEFAULT_SETTINGS["text"])
+    preset_index = 0 if current_text not in preset_names[1:] else preset_names.index(current_text)
+    preset = st.selectbox("📝 Yozuv namunasi", preset_names, index=preset_index, key="wm_preset")
+    if preset != "✏️ Maxsus matn":
+        st.session_state["wm_text"] = preset
+    wm_text = st.text_input("✏️ Watermark yozuvi", key="wm_text", max_chars=120, help="Istalgan yozuvni kiriting.")
+
+    style_options = {
+        "Diagonal": "diagonal", "Markaziy": "center", "Takrorlanuvchi": "pattern",
+        "Burchak": "corner", "Ikki diagonal": "double", "Stamp": "stamp", "Kontur": "outline",
+    }
+    reverse_style = {v:k for k,v in style_options.items()}
+    current_style_label = reverse_style.get(st.session_state.get("wm_style", "diagonal"), "Diagonal")
+
+    c1, c2, c3 = st.columns(3)
     with c1:
-        wm_text = st.text_input("✏️ Watermark matni", key="wm_text", max_chars=120)
-        wm_style_label = st.selectbox(
-            "🎨 Dizayn",
-            ["Diagonal", "Markaziy", "Takrorlanuvchi Pattern"],
-            index={"diagonal": 0, "center": 1, "pattern": 2}.get(st.session_state.get("wm_style", "diagonal"), 0),
-            key="wm_style_label",
-        )
+        wm_style_label = st.selectbox("🎨 Uslub / dizayn", list(style_options.keys()), index=list(style_options.keys()).index(current_style_label), key="wm_style_label")
     with c2:
-        wm_opacity = st.slider("👻 Shaffoflik", 5, 60, int(st.session_state.get("wm_opacity", 18)), 1, key="wm_opacity")
-        wm_size = st.slider("🔠 Matn hajmi", 10, 100, int(st.session_state.get("wm_size", 30)), 2, key="wm_size")
-
-    c3, c4, c5 = st.columns(3)
+        wm_opacity = st.slider("👻 Shaffoflik (%)", 1, 100, int(st.session_state.get("wm_opacity", 18)), 1, key="wm_opacity")
     with c3:
-        wm_angle = st.slider("📐 Burchak", -90, 90, int(st.session_state.get("wm_angle", -35)), 5, key="wm_angle")
-    with c4:
-        wm_color = st.color_picker("🎨 Rang", value=st.session_state.get("wm_color", "#FFFFFF"), key="wm_color")
-    with c5:
-        wm_bold = st.checkbox("Qalin", value=bool(st.session_state.get("wm_bold", True)), key="wm_bold")
+        wm_size = st.slider("🔠 Yozuv hajmi", 8, 120, int(st.session_state.get("wm_size", 30)), 2, key="wm_size")
 
-    style_map = {"Diagonal": "diagonal", "Markaziy": "center", "Takrorlanuvchi Pattern": "pattern"}
-    st.session_state["wm_style"] = style_map[wm_style_label]
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        wm_angle = st.slider("📐 Burchak", -180, 180, int(st.session_state.get("wm_angle", -35)), 5, key="wm_angle")
+    with c5:
+        wm_color = st.color_picker("🎨 Yozuv rangi", value=st.session_state.get("wm_color", "#FFFFFF"), key="wm_color")
+    with c6:
+        wm_font_label = st.selectbox("🔤 Shrift", ["Sans", "Serif", "Mono"], index={"sans":0,"serif":1,"mono":2}.get(st.session_state.get("wm_font","sans"),0), key="wm_font_label")
+
+    c7, c8, c9 = st.columns(3)
+    with c7:
+        wm_bold = st.checkbox("B 🔥 Qalin yozuv", value=bool(st.session_state.get("wm_bold", True)), key="wm_bold")
+    with c8:
+        wm_stroke = st.slider("🖊️ Kontur qalinligi", 0, 10, int(st.session_state.get("wm_stroke", 0)), 1, key="wm_stroke")
+    with c9:
+        wm_gap = st.slider("↔️ Pattern oralig'i", 40, 500, int(st.session_state.get("wm_pattern_gap", 180)), 10, key="wm_pattern_gap")
+
+    st.session_state["wm_style"] = style_options[wm_style_label]
+    font_map = {"Sans":"sans", "Serif":"serif", "Mono":"mono"}
     wm_settings = normalize_settings({
         "enabled": wm_enabled,
         "text": wm_text,
@@ -363,22 +379,28 @@ def main():
         "size": wm_size,
         "color": wm_color,
         "bold": wm_bold,
-        "pattern_gap": 180,
+        "font": font_map[wm_font_label],
+        "stroke": wm_stroke,
+        "pattern_gap": wm_gap,
     })
 
     preview_source = next((q.get("image_b64") for q in questions if q.get("image_b64")), None)
-    p1, p2 = st.columns([1, 1])
+    p1, p2, p3 = st.columns(3)
     with p1:
-        if st.button("👁️ Preview ko'rsatish", use_container_width=True):
+        if st.button("👁️ Preview", use_container_width=True, type="primary"):
             st.session_state["wm_show_preview"] = True
     with p2:
-        if st.button("🙈 Previewni yopish", use_container_width=True):
+        if st.button("🔄 Standart", use_container_width=True):
+            for k,v in DEFAULT_SETTINGS.items(): st.session_state[f"wm_{k}"] = v
+            st.rerun()
+    with p3:
+        if st.button("🙈 Yopish", use_container_width=True):
             st.session_state["wm_show_preview"] = False
 
     if st.session_state.get("wm_show_preview"):
         if preview_source:
             try:
-                st.image(preview_bytes(base64.b64decode(preview_source), wm_settings), caption="Watermark Preview — rasmning o'ziga qo'yiladi", use_container_width=True)
+                st.image(preview_bytes(base64.b64decode(preview_source), wm_settings), caption=f"👁️ Preview • {wm_text} • {wm_style_label} • {wm_opacity}%", use_container_width=True)
             except Exception as e:
                 st.warning(f"Preview yaratilmadi: {e}")
         else:
