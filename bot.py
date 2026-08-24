@@ -349,6 +349,9 @@ async def handle_document(message: Message):
                 f.write(file_bytes)
             settings = get_watermark_settings(chat_id)
             _, changed = watermark_docx(in_path, out_path, settings)
+            report = getattr(watermark_docx, "last_report", {}) or {}
+            repaired = int(report.get("repaired", 0) or 0)
+            failed_media = report.get("failed_media", []) or []
 
             # Birinchi rasmni preview sifatida yuborishga harakat qilamiz.
             try:
@@ -361,11 +364,21 @@ async def handle_document(message: Message):
             except Exception:
                 pass
 
-            await message.answer(
-                f"✅ Tayyor! {changed} ta rasmga watermark qo'yildi.\n"
-                f"📐 Rasm o'lchami va Word'dagi joylashuvi saqlandi.\n"
-                f"🛡️ Original fayl o'zgartirilmadi.",
-            )
+            status_lines = [f"✅ Tayyor! {changed} ta rasmga watermark qo'yildi."]
+            if repaired:
+                status_lines.append(
+                    f"♻️ {repaired} ta Word media faylining CRC ma'lumoti qayta tiklandi."
+                )
+            if failed_media:
+                status_lines.append(
+                    f"⚠️ {len(failed_media)} ta rasmni o'qib bo'lmadi: "
+                    + ", ".join(os.path.basename(x) for x in failed_media[:5])
+                )
+            status_lines += [
+                "📐 Rasm o'lchami va Word'dagi joylashuvi saqlandi.",
+                "🛡️ Original fayl o'zgartirilmadi.",
+            ]
+            await message.answer("\n".join(status_lines))
             await message.answer_document(FSInputFile(out_path, filename=f"watermarked_{doc.file_name}"))
         except Exception as e:
             logger.exception("DOCX watermark xatosi")

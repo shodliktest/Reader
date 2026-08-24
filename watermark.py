@@ -170,38 +170,98 @@ def watermark_image_bytes(image_bytes, settings=None):
     return out.getvalue()
 
 
+def _read_zip_entry_tolerant(zf, info):
+    """ZIP entry'ni CRC xatosiga chidamli o'qish.
+
+    Ba'zi Word fayllarida media entry'ning CRC qiymati noto'g'ri bo'ladi,
+    lekin compressed data o'zi to'liq va o'qiladigan bo'lishi mumkin.
+    Python zipfile odatda bunday entry'ni `Bad CRC-32` bilan rad etadi.
+    Shu holatda faqat CRC tekshiruvini vaqtincha o'chirib, data'ni
+    dekompressiya qilamiz. Bu original ZIP'ni o'zgartirmaydi.
+    """
+    try:
+        return zf.read(info)
+    except (zipfile.BadZipFile, RuntimeError, EOFError) as first_error:
+        # ZipExtFile CRC tekshiruvini info.CRC orqali amalga oshiradi.
+        # Nusxada CRC=None qilish check'ni o'chiradi, lekin compression,
+        # offset va boshqa ZIP metadata'lari saqlanib qoladi.
+        tolerant_info = deepcopy(info)
+        tolerant_info.CRC = None
+        try:
+            with zf.open(tolerant_info, "r") as fp:
+                return fp.read()
+        except Exception:
+            raise first_error
+
+
 def watermark_docx(input_path, output_path, settings=None):
     """Existing DOCX ichidagi word/media/* rasmlariga watermark qo'yadi.
+
+    CRC xatosi bo'lgan Word rasmlarini ham imkon qadar o'qiydi. Agar entry
+    compressed data'si o'qiladigan bo'lsa, yangi DOCX qayta yig'ilganda CRC
+    avtomatik ravishda to'g'ri hisoblanadi. Shuning uchun `image14.jpeg` kabi
+    bitta nosoz CRC butun Word faylini yiqitmaydi.
 
     ZIP entry'lar va document XML o'z holicha qoladi; faqat rasm bytes'lari
     almashtiriladi. input_path hech qachon yozilmaydi.
     """
     s = normalize_settings(settings)
     if not s["enabled"]:
-        # Shunchaki xavfsiz nusxa
         with open(input_path, "rb") as src, open(output_path, "wb") as dst:
             dst.write(src.read())
         return output_path, 0
 
     changed = 0
+    repaired = 0
+    failed_media = []
+
     with zipfile.ZipFile(input_path, "r") as zin, zipfile.ZipFile(
         output_path, "w", compression=zipfile.ZIP_DEFLATED
     ) as zout:
         for item in zin.infolist():
-            data = zin.read(item.filename)
             lower = item.filename.lower()
             ext = os.path.splitext(lower)[1]
+
+            try:
+                data = _read_zip_entry_tolerant(zin, item)
+            except Exception:
+                # Media entry bo'lsa, foydalanuvchiga keyin ko'rsatish uchun
+                # nomini saqlaymiz. Boshqa entry'lar ham o'qilmasa, DOCX
+                # strukturasi buzilmasligi uchun jarayonni to'xtatamiz.
+                if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
+                    failed_media.append(item.filename)
+                    continue
+                raise
+
+            # CRC xatosi bo'lgan entry tolerant usul bilan o'qilgan bo'lsa,
+            # yangi ZIP'ga yozishda CRC qayta hisoblanadi.
+            original_crc = item.CRC
+            if original_crc is not None:
+                import zlib
+                actual_crc = zlib.crc32(data) & 0xFFFFFFFF
+                if actual_crc != original_crc:
+                    repaired += 1
+
             if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
                 try:
-                    new_data = watermark_image_bytes(data, s)
-                    data = new_data
+                    data = watermark_image_bytes(data, s)
                     changed += 1
                 except Exception:
-                    # Buzuq/qo'llab bo'lmaydigan rasm bo'lsa, original bytes qoladi.
-                    pass
-            # metadata va fayl tartibini imkon qadar saqlaymiz
+                    # Rasm haqiqatan buzilgan bo'lsa, mavjud data'ni saqlaymiz.
+                    # Keyingi bosqichda Word fayli baribir yig'iladi.
+                    failed_media.append(item.filename)
+
+            # writestr bytes berilganda CRC/size qayta hisoblanadi.
+            # Shu bilan noto'g'ri CRC bo'lgan entry'lar ham tuzatiladi.
             zout.writestr(item, data)
 
+    # Moslik uchun eski API ikkita qiymat qaytaradi. Log/diagnostika kerak
+    # bo'lsa watermark_docx.last_report orqali ma'lumot olish mumkin.
+    watermark_docx.last_report = {
+        "changed": changed,
+        "repaired": repaired,
+        "failed_media": failed_media,
+    }
     return output_path, changed
 
 
