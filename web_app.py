@@ -55,6 +55,7 @@ if _THIS_DIR not in sys.path:
 
 import session_store
 from docx_builder import build_docx
+from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes
 from processor import detect_photo_region
 
 # Streamlit Cloud'da API kalitlar "Secrets" bo'limida saqlanadi (st.secrets),
@@ -314,6 +315,74 @@ def main():
     # Fayl nomi maydoni - standart qiymat zip fayl nomi (yoki bot bergan default)
     default_name = data.get("default_filename", "natija")
     filename = st.text_input("📁 Word fayl nomi", value=default_name)
+
+    # ------------------------------------------------------------------
+    # RASM WATERMARK SOZLAMALARI
+    # Watermark Word sahifasiga emas, Word ichidagi rasmlarning pixel'lariga
+    # qo'llanadi. Sozlamalar Telegram botdan kelgan qiymatlar bilan boshlanadi,
+    # lekin shu sahifada ham to'liq boshqariladi.
+    # ------------------------------------------------------------------
+    wm_initial = normalize_settings(data.get("watermark_settings", DEFAULT_SETTINGS))
+    for _k, _v in wm_initial.items():
+        st.session_state.setdefault(f"wm_{_k}", _v)
+    st.session_state.setdefault("wm_show_preview", False)
+
+    st.subheader("💧 Rasm Watermark")
+    st.caption("Watermark faqat Word ichidagi rasmlarga qo'shiladi. Word sahifasi, matnlar va rasmning joylashuvi o'zgarmaydi.")
+
+    wm_enabled = st.checkbox("Watermarkni yoqish", key="wm_enabled")
+    c1, c2 = st.columns(2)
+    with c1:
+        wm_text = st.text_input("✏️ Watermark matni", key="wm_text", max_chars=120)
+        wm_style_label = st.selectbox(
+            "🎨 Dizayn",
+            ["Diagonal", "Markaziy", "Takrorlanuvchi Pattern"],
+            index={"diagonal": 0, "center": 1, "pattern": 2}.get(st.session_state.get("wm_style", "diagonal"), 0),
+            key="wm_style_label",
+        )
+    with c2:
+        wm_opacity = st.slider("👻 Shaffoflik", 5, 60, int(st.session_state.get("wm_opacity", 18)), 1, key="wm_opacity")
+        wm_size = st.slider("🔠 Matn hajmi", 10, 100, int(st.session_state.get("wm_size", 30)), 2, key="wm_size")
+
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        wm_angle = st.slider("📐 Burchak", -90, 90, int(st.session_state.get("wm_angle", -35)), 5, key="wm_angle")
+    with c4:
+        wm_color = st.color_picker("🎨 Rang", value=st.session_state.get("wm_color", "#FFFFFF"), key="wm_color")
+    with c5:
+        wm_bold = st.checkbox("Qalin", value=bool(st.session_state.get("wm_bold", True)), key="wm_bold")
+
+    style_map = {"Diagonal": "diagonal", "Markaziy": "center", "Takrorlanuvchi Pattern": "pattern"}
+    st.session_state["wm_style"] = style_map[wm_style_label]
+    wm_settings = normalize_settings({
+        "enabled": wm_enabled,
+        "text": wm_text,
+        "style": st.session_state["wm_style"],
+        "opacity": wm_opacity,
+        "angle": wm_angle,
+        "size": wm_size,
+        "color": wm_color,
+        "bold": wm_bold,
+        "pattern_gap": 180,
+    })
+
+    preview_source = next((q.get("image_b64") for q in questions if q.get("image_b64")), None)
+    p1, p2 = st.columns([1, 1])
+    with p1:
+        if st.button("👁️ Preview ko'rsatish", use_container_width=True):
+            st.session_state["wm_show_preview"] = True
+    with p2:
+        if st.button("🙈 Previewni yopish", use_container_width=True):
+            st.session_state["wm_show_preview"] = False
+
+    if st.session_state.get("wm_show_preview"):
+        if preview_source:
+            try:
+                st.image(preview_bytes(base64.b64decode(preview_source), wm_settings), caption="Watermark Preview — rasmning o'ziga qo'yiladi", use_container_width=True)
+            except Exception as e:
+                st.warning(f"Preview yaratilmadi: {e}")
+        else:
+            st.info("Preview uchun kamida bitta rasm kerak.")
 
     st.divider()
 
@@ -736,7 +805,15 @@ def main():
             clean_filename += ".docx"
 
         out_path = f"/tmp/{session_id}_final.docx"
-        build_docx(final_questions, out_path, title=clean_filename.replace(".docx", ""))
+        # Joriy watermark sozlamalarini sessiyaga saqlaymiz - bot va keyingi
+        # qayta ochilishlarda aynan shu konfiguratsiya ishlatiladi.
+        session_store.update_session(session_id, watermark_settings=wm_settings)
+        build_docx(
+            final_questions,
+            out_path,
+            title=clean_filename.replace(".docx", ""),
+            watermark_settings=wm_settings,
+        )
 
         with st.spinner("Word fayl yaratilmoqda va chatga yuborilmoqda..."):
             chat_id = data.get("telegram_chat_id")

@@ -34,6 +34,7 @@ import io
 import asyncio
 import logging
 import zipfile
+import html
 from datetime import datetime
 
 # MUHIM: bot.py Streamlit'ning fon-thread'i ichida ishga tushirilganda
@@ -59,6 +60,7 @@ from aiogram.enums import ParseMode
 import session_store
 from processor import process_single_image
 from docx_builder import build_docx
+from watermark import DEFAULT_SETTINGS, normalize_settings, watermark_docx, preview_bytes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -89,6 +91,33 @@ VALID_IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
 # Bu RAM'da, chunki har bir foydalanuvchi bir vaqtning o'zida faqat bitta faol
 # to'plash jarayoniga ega bo'lishi kerak (ikkinchisini boshlasa, avvalgisi almashtiriladi).
 _active_sessions = {}
+
+# Har bir chat uchun watermark sozlamalari. Sozlamalar sessiyaga ham nusxalanadi,
+# shuning uchun Streamlit preview/generator aynan shu tanlovlardan foydalanadi.
+_watermark_settings = {}
+_wm_text_mode = set()
+
+
+def get_watermark_settings(chat_id):
+    return normalize_settings(_watermark_settings.get(chat_id, DEFAULT_SETTINGS))
+
+
+def watermark_settings_keyboard(chat_id):
+    s = get_watermark_settings(chat_id)
+    enabled = "ON 🟢" if s["enabled"] else "OFF 🔴"
+    style_labels = {"diagonal": "Diagonal", "center": "Markaziy", "pattern": "Pattern"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💧 Watermark: {enabled}", callback_data="wm_toggle")],
+        [
+            InlineKeyboardButton(text="✏️ Matn", callback_data="wm_text"),
+            InlineKeyboardButton(text=f"🎨 {style_labels[s['style']]}", callback_data="wm_style"),
+        ],
+        [
+            InlineKeyboardButton(text=f"👻 {s['opacity']}%", callback_data="wm_opacity"),
+            InlineKeyboardButton(text=f"📐 {s['size']}px", callback_data="wm_size"),
+        ],
+        [InlineKeyboardButton(text="👁️ Preview", callback_data="wm_preview")],
+    ])
 
 
 def collecting_keyboard(count):
@@ -129,8 +158,124 @@ async def cmd_start(message: Message):
         "Menga YHQ test skrinshotlarini (rasm sifatida, bir nechtasini birma-bir) "
         "yoki ichida rasmlar bo'lgan <b>.zip</b> faylni yuboring.\n\n"
         "Barcha rasmlarni yuborib bo'lgach, <b>✅ Tugatish</b> tugmasini bosing - "
-        "men ularni qayta ishlab, tekshirish uchun sizga havola yuboraman."
+        "men ularni qayta ishlab, tekshirish uchun sizga havola yuboraman.\n\n"
+        "💧 Watermarkni sozlash: /watermark\n"
+        "📄 Tayyor Word faylga ham watermark qo'yish mumkin - .docx faylni shu yerga yuboring."
     )
+
+
+@dp.message(Command("watermark"))
+async def cmd_watermark(message: Message):
+    chat_id = message.chat.id
+    await message.answer(
+        "💧 <b>Rasm Watermark sozlamalari</b>\n\n"
+        "Bu sozlamalar Word sahifasiga emas, Word ichidagi rasmlarning O'ZIGA qo'llanadi.\n"
+        "Tayyor .docx yuborsangiz ham shu sozlamalar ishlaydi.",
+        reply_markup=watermark_settings_keyboard(chat_id),
+    )
+
+
+@dp.callback_query(F.data == "wm_toggle")
+async def wm_toggle(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    s["enabled"] = not s["enabled"]
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer("Watermark yoqildi." if s["enabled"] else "Watermark o'chirildi.")
+
+
+@dp.callback_query(F.data == "wm_style")
+async def wm_style(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    order = ["diagonal", "center", "pattern"]
+    s["style"] = order[(order.index(s["style"]) + 1) % len(order)]
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Dizayn: {s['style']}")
+
+
+@dp.callback_query(F.data == "wm_text")
+async def wm_text(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    _wm_text_mode.add(chat_id)
+    current = get_watermark_settings(chat_id)["text"]
+    await callback.message.answer(
+        f"✏️ Yangi watermark matnini yuboring.\n\nHozirgi: <code>{html.escape(current)}</code>\n\n"
+        "Masalan: <code>© QUIZMAKER</code> yoki <code>@MyTestBot</code>"
+    )
+    await callback.answer()
+
+
+@dp.message(F.text)
+async def wm_text_input(message: Message):
+    chat_id = message.chat.id
+    if chat_id not in _wm_text_mode:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Matn bo'sh bo'lishi mumkin emas. Qayta yuboring.")
+        return
+    s = get_watermark_settings(chat_id)
+    s["text"] = text[:120]
+    _watermark_settings[chat_id] = s
+    _wm_text_mode.discard(chat_id)
+    await message.answer("✅ Watermark matni saqlandi.", reply_markup=watermark_settings_keyboard(chat_id))
+
+
+@dp.callback_query(F.data == "wm_opacity")
+async def wm_opacity(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    levels = [10, 15, 18, 22, 28, 35]
+    current = s["opacity"]
+    try:
+        idx = levels.index(current)
+        s["opacity"] = levels[(idx + 1) % len(levels)]
+    except ValueError:
+        s["opacity"] = 18
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Shaffoflik: {s['opacity']}%")
+
+
+@dp.callback_query(F.data == "wm_size")
+async def wm_size(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    levels = [20, 24, 28, 32, 38, 46]
+    current = s["size"]
+    try:
+        idx = levels.index(current)
+        s["size"] = levels[(idx + 1) % len(levels)]
+    except ValueError:
+        s["size"] = 30
+    _watermark_settings[chat_id] = s
+    await callback.message.edit_reply_markup(reply_markup=watermark_settings_keyboard(chat_id))
+    await callback.answer(f"Hajm: {s['size']}px")
+
+
+@dp.callback_query(F.data == "wm_preview")
+async def wm_preview(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    s = get_watermark_settings(chat_id)
+    session_id = _active_sessions.get(chat_id)
+    data = session_store.get_session(session_id) if session_id else None
+    if not data or not data.get("images"):
+        await callback.answer("Preview uchun avval kamida bitta rasm yuboring.", show_alert=True)
+        return
+    try:
+        import base64
+        raw = base64.b64decode(data["images"][0]["b64"])
+        out = preview_bytes(raw, s)
+        await callback.message.answer_photo(
+            __import__('aiogram').types.BufferedInputFile(out, filename="watermark_preview.png"),
+            caption=f"👁️ Preview\nMatn: <b>{html.escape(s['text'])}</b>\nDizayn: <b>{html.escape(s['style'])}</b>\nShaffoflik: <b>{s['opacity']}%</b>",
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"Preview xatosi: {e}", show_alert=True)
 
 
 def _get_or_create_session(chat_id, user_id):
@@ -142,6 +287,8 @@ def _get_or_create_session(chat_id, user_id):
     # Yangi sessiya
     session_id = session_store.new_session_id()
     data = session_store.create_session(session_id, user_id, chat_id)
+    session_store.update_session(session_id, watermark_settings=get_watermark_settings(chat_id))
+    data = session_store.get_session(session_id)
     _active_sessions[chat_id] = session_id
     return session_id, data
 
@@ -180,9 +327,8 @@ async def handle_photo(message: Message):
 
 @dp.message(F.document)
 async def handle_document(message: Message):
-    """Foydalanuvchi rasmni FAYL sifatida (siqilmagan) yoki .zip fayl yuborsa."""
+    """Rasm, ZIP yoki tayyor DOCX faylni qabul qiladi."""
     chat_id = message.chat.id
-    session_id, data = _get_or_create_session(chat_id, message.from_user.id)
 
     doc = message.document
     fname = (doc.file_name or "").lower()
@@ -192,7 +338,48 @@ async def handle_document(message: Message):
     await bot.download_file(file.file_path, destination=buf)
     file_bytes = buf.getvalue()
 
-    if fname.endswith('.zip'):
+    if fname.endswith('.docx'):
+        # Tayyor Word faylni sahifaga watermark emas, faqat word/media/*
+        # ichidagi rasmlarga qo'yamiz. Original faylga umuman yozilmaydi.
+        await message.answer("💧 Word ichidagi rasmlar tekshirilmoqda va watermark qo'shilmoqda...")
+        in_path = f"/tmp/{message.chat.id}_{doc.file_id}_original.docx"
+        out_path = f"/tmp/{message.chat.id}_{doc.file_id}_watermarked.docx"
+        try:
+            with open(in_path, "wb") as f:
+                f.write(file_bytes)
+            settings = get_watermark_settings(chat_id)
+            _, changed = watermark_docx(in_path, out_path, settings)
+
+            # Birinchi rasmni preview sifatida yuborishga harakat qilamiz.
+            try:
+                with zipfile.ZipFile(out_path, "r") as zf:
+                    media = [n for n in zf.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in VALID_IMAGE_EXT]
+                    if media:
+                        preview = preview_bytes(zf.read(media[0]), settings)
+                        from aiogram.types import BufferedInputFile
+                        await message.answer_photo(BufferedInputFile(preview, filename="watermark_preview.png"), caption="👁️ Watermark preview")
+            except Exception:
+                pass
+
+            await message.answer(
+                f"✅ Tayyor! {changed} ta rasmga watermark qo'yildi.\n"
+                f"📐 Rasm o'lchami va Word'dagi joylashuvi saqlandi.\n"
+                f"🛡️ Original fayl o'zgartirilmadi.",
+            )
+            await message.answer_document(FSInputFile(out_path, filename=f"watermarked_{doc.file_name}"))
+        except Exception as e:
+            logger.exception("DOCX watermark xatosi")
+            await message.answer(f"❌ Word faylni qayta ishlashda xatolik: {e}")
+        finally:
+            for path in (in_path, out_path):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+
+    elif fname.endswith('.zip'):
+        session_id, data = _get_or_create_session(chat_id, message.from_user.id)
         await message.answer("📦 Zip fayl qabul qilindi, ichidagi rasmlar ajratilmoqda...")
         added = 0
         try:
@@ -219,6 +406,7 @@ async def handle_document(message: Message):
         )
 
     elif fname.endswith(VALID_IMAGE_EXT):
+        session_id, data = _get_or_create_session(chat_id, message.from_user.id)
         count = await _add_image_bytes_to_session(session_id, file_bytes, doc.file_name)
         await message.answer(
             f"📷 {count} ta rasm qabul qilindi.",
@@ -311,7 +499,7 @@ async def _process_session_and_notify(session_id, chat_id):
     else:
         # WEBAPP_BASE_URL sozlanmagan bo'lsa - to'g'ridan-to'g'ri Word yaratib yuboramiz
         out_path = f"/tmp/{session_id}.docx"
-        build_docx(questions, out_path, title=data.get("default_filename", "Test Savollari"))
+        build_docx(questions, out_path, title=data.get("default_filename", "Test Savollari"), watermark_settings=data.get("watermark_settings"))
         await bot.send_document(chat_id, FSInputFile(out_path, filename=f"{data.get('default_filename','natija')}.docx"))
         session_store.clear_session(session_id)
 

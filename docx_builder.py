@@ -25,6 +25,7 @@ import base64
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from watermark import watermark_image_bytes
 
 FKEY_TO_LETTER = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -33,7 +34,7 @@ BODY_FONT_SIZE = Pt(12)
 IMAGE_WIDTH_INCHES = Inches(3.65)
 
 
-def build_docx(questions, output_path, title="Test Savollari"):
+def build_docx(questions, output_path, title="Test Savollari", watermark_settings=None):
     """questions: [{
            "question": str,
            "options": [str, ...],
@@ -62,6 +63,12 @@ def build_docx(questions, output_path, title="Test Savollari"):
 
         # --- Asl rasm (agar mavjud bo'lsa) - savol matnidan OLDIN, markazda ---
         if image_bytes:
+            if watermark_settings and watermark_settings.get("enabled", True):
+                try:
+                    image_bytes = watermark_image_bytes(image_bytes, watermark_settings)
+                except Exception:
+                    # Watermark xatosi Word yaratishni to'xtatmasin.
+                    pass
             img_paragraph = doc.add_paragraph()
             img_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             try:
