@@ -134,28 +134,25 @@ def watermark_settings_keyboard(chat_id):
 
 
 def docx_web_keyboard(session_id):
-    """Word fayli uchun rasm oqimidagi bilan bir xil Web "Tekshirish" tugmasi."""
+    """Word fayli ostida ikkita MUSTAQIL Web sahifa tugmasi."""
     if not WEBAPP_BASE_URL:
         return None
-    url = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
+    base = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Tekshirish", url=url)]
+        [InlineKeyboardButton(text="🔍 Tekshirish", url=f"{base}&page=watermark")],
+        [InlineKeyboardButton(text="🏷️ Emblema almashtirish", url=f"{base}&page=emblem")],
     ])
 
 
 def docx_keyboard(chat_id):
-    """Yuborilgan Word fayl ostidagi boshqaruv tugmalari."""
-    s = get_watermark_settings(chat_id)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔍 Tekshirish", callback_data="docx_check"),
-            InlineKeyboardButton(text="💧 Watermark", callback_data="docx_settings"),
-        ],
-        [
-            InlineKeyboardButton(text="👁️ Preview", callback_data="docx_preview"),
-            InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel"),
-        ],
-        [InlineKeyboardButton(text=f"💧 {s['opacity']}% • {STYLE_LABELS.get(s['style'], s['style'])} • {s['text'][:20]}", callback_data="docx_settings")],
+    """Legacy callback keyboard; Web sahifalar alohida va mustaqil."""
+    pending = _pending_docx_info(chat_id)
+    if not pending or not WEBAPP_BASE_URL:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel")]
+        ])
+    return docx_web_keyboard(pending.get("session_id")) or InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel")]
     ])
 
 
@@ -546,11 +543,9 @@ async def handle_document(message: Message):
             kb = docx_web_keyboard(session_id)
             caption = (
                 "📄 <b>Word fayl qabul qilindi.</b>\n\n"
-                "Rasm yuborgandagi kabi quyidagi tugmani bosing. "
-                "Web sahifada watermark yozuvi, uslubi, shaffofligi va boshqa "
-                "parametrlarni sozlab, Preview qiling.\n\n"
-                "⚠️ Word ichidagi bitta rasm CRC xatosiga ega bo'lsa ham, "
-                "o'qiladigan boshqa rasmlar Preview'da ishlashda davom etadi."
+                "🔍 <b>Tekshirish</b> — natijalarni/watermarkni sozlash sahifasi.\n"
+                "🏷️ <b>Emblema almashtirish</b> — alohida emblemani topish, belgilash va almashtirish sahifasi.\n\n"
+                "⚠️ CRC muammoli bitta rasm qolgan rasmlarni to'xtatmaydi."
             )
             await message.answer_document(
                 FSInputFile(mirror_path, filename=doc.file_name or "document.docx"),
