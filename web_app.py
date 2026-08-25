@@ -55,7 +55,7 @@ if _THIS_DIR not in sys.path:
 
 import session_store
 from docx_builder import build_docx
-from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes
+from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes, watermark_docx
 from processor import detect_photo_region
 
 # Streamlit Cloud'da API kalitlar "Secrets" bo'limida saqlanadi (st.secrets),
@@ -273,6 +273,114 @@ def send_docx_to_telegram(chat_id, file_path, filename):
     return True
 
 
+
+def _docx_first_image_bytes(raw):
+    """DOCX ichidagi birinchi rasmni CRC muammosiga chidamli tarzda olish."""
+    import zipfile, tempfile, os
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as z:
+        names = [n for n in z.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}]
+        if not names:
+            return None
+        try:
+            return z.read(names[0])
+        except Exception:
+            inp = f"/tmp/docx_preview_{os.getpid()}.docx"
+            out = f"/tmp/docx_preview_fixed_{os.getpid()}.docx"
+            with open(inp, "wb") as f: f.write(raw)
+            try:
+                watermark_docx(inp, out, {**DEFAULT_SETTINGS, "enabled": False})
+                with zipfile.ZipFile(out, "r") as fixed:
+                    names2 = [n for n in fixed.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}]
+                    return fixed.read(names2[0]) if names2 else None
+            finally:
+                for x in (inp, out):
+                    try: os.remove(x)
+                    except Exception: pass
+
+
+def docx_watermark_editor(session_id, data):
+    """Rasm oqimidagi Web editorning aynan o'zi, faqat input DOCX."""
+    import base64, os, tempfile
+    raw = base64.b64decode(data.get("docx_b64", ""))
+    filename = data.get("docx_filename", "document.docx")
+    if not raw:
+        st.error("❌ Word fayl ma'lumotlari topilmadi.")
+        return
+
+    st.title("💧 Word Watermark Editor")
+    st.caption(f"📄 {filename} — watermark Word sahifasiga emas, ichidagi rasmlarning o'ziga qo'yiladi.")
+
+    initial = normalize_settings(data.get("watermark_settings", DEFAULT_SETTINGS))
+    for k, v in initial.items():
+        st.session_state.setdefault(f"docx_wm_{k}", v)
+
+    enabled = st.checkbox("Watermarkni yoqish", key="docx_wm_enabled")
+    presets = ["✏️ Maxsus matn", "© QuizMaker Bot", "QUIZMAKER", "@MyTestBot", "CONFIDENTIAL", "SAMPLE"]
+    current = st.session_state.get("docx_wm_text", DEFAULT_SETTINGS["text"])
+    idx = presets.index(current) if current in presets else 0
+    preset = st.selectbox("📝 Yozuv namunasi", presets, index=idx, key="docx_wm_preset")
+    if preset != "✏️ Maxsus matn":
+        st.session_state["docx_wm_text"] = preset
+    text = st.text_input("✏️ Watermark yozuvi", key="docx_wm_text", max_chars=120)
+
+    style_options = {"Diagonal":"diagonal","Markaziy":"center","Takrorlanuvchi":"pattern","Burchak":"corner","Ikki diagonal":"double","Stamp":"stamp","Kontur":"outline"}
+    current_style = st.session_state.get("docx_wm_style", DEFAULT_SETTINGS["style"])
+    labels = list(style_options.keys())
+    current_label = next((k for k,v in style_options.items() if v == current_style), labels[0])
+    style_label = st.selectbox("🎨 Uslub / dizayn", labels, index=labels.index(current_label), key="docx_wm_style_label")
+    opacity = st.slider("👻 Shaffoflik (%)", 1, 100, int(st.session_state.get("docx_wm_opacity", 18)), key="docx_wm_opacity")
+    size = st.slider("🔠 Yozuv hajmi", 8, 180, int(st.session_state.get("docx_wm_size", 30)), 2, key="docx_wm_size")
+    angle = st.slider("📐 Burchak", -180, 180, int(st.session_state.get("docx_wm_angle", -35)), 5, key="docx_wm_angle")
+    color = st.color_picker("🎨 Yozuv rangi", value=st.session_state.get("docx_wm_color", "#FFFFFF"), key="docx_wm_color")
+    font_labels = ["Sans", "Serif", "Mono"]
+    fmap = {"Sans":"sans","Serif":"serif","Mono":"mono"}
+    font = st.selectbox("🔤 Shrift", font_labels, index=font_labels.index(next((x for x in font_labels if fmap[x] == st.session_state.get("docx_wm_font","sans")), "Sans")), key="docx_wm_font_label")
+    bold = st.checkbox("Qalin yozuv", key="docx_wm_bold")
+    gap = st.slider("↔️ Pattern oralig'i", 40, 600, int(st.session_state.get("docx_wm_pattern_gap", 180)), 10, key="docx_wm_pattern_gap")
+    stroke = st.slider("🖊 Kontur qalinligi", 0, 12, int(st.session_state.get("docx_wm_stroke", 0)), key="docx_wm_stroke")
+
+    settings = normalize_settings({"enabled":enabled,"text":text,"style":style_options[style_label],"opacity":opacity,"size":size,"angle":angle,"color":color,"font":fmap[font],"bold":bold,"pattern_gap":gap,"stroke":stroke})
+    session_store.update_session(session_id, watermark_settings=settings)
+
+    st.divider()
+    st.subheader("👁️ Preview")
+    try:
+        img_bytes = _docx_first_image_bytes(raw)
+        if img_bytes:
+            st.image(preview_bytes(img_bytes, settings), use_container_width=True, caption=f"{style_label} • {opacity}% • {text}")
+        else:
+            st.info("Word ichida preview qilish uchun rasm topilmadi.")
+    except Exception as e:
+        st.warning(f"Preview vaqtida rasm o'qilmadi: {e}")
+
+    st.divider()
+    if st.button("💧 Watermarkni Word rasmlariga qo‘llash", type="primary", use_container_width=True):
+        if not enabled:
+            st.warning("Avval Watermarkni yoqing.")
+            return
+        inp = f"/tmp/{session_id}_source.docx"
+        out = f"/tmp/{session_id}_watermarked.docx"
+        try:
+            with open(inp, "wb") as f: f.write(raw)
+            with st.spinner("Word ichidagi barcha rasmlar tekshirilmoqda va watermark qo‘llanmoqda..."):
+                _, changed = watermark_docx(inp, out, settings)
+                chat_id = data.get("telegram_chat_id")
+                ok = send_docx_to_telegram(chat_id, out, filename)
+            if ok:
+                report = getattr(watermark_docx, "last_report", {}) or {}
+                st.success(f"✅ Tayyor! {changed} ta rasmga watermark qo‘yildi.")
+                if report.get("repaired"):
+                    st.info(f"♻️ {report['repaired']} ta muammoli rasm qayta tiklandi.")
+                session_store.clear_session(session_id)
+            else:
+                st.error("❌ Word fayl Telegram'ga yuborilmadi.")
+        except Exception as e:
+            st.error(f"❌ Word faylni qayta ishlashda xatolik: {e}")
+        finally:
+            for x in (inp, out):
+                try: os.remove(x)
+                except Exception: pass
+
 def main():
     ensure_bot_running()
 
@@ -302,6 +410,10 @@ def main():
 
     if data.get("status") == "done":
         st.success("Bu partiya allaqachon yakunlangan. Word fayl chatga yuborilgan.")
+        return
+
+    if data.get("input_type") == "docx":
+        docx_watermark_editor(session_id, data)
         return
 
     questions = data.get("questions", [])

@@ -133,19 +133,17 @@ def watermark_settings_keyboard(chat_id):
 
 
 def docx_keyboard(chat_id):
-    """Yuborilgan Word fayl ostidagi boshqaruv tugmalari."""
-    s = get_watermark_settings(chat_id)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔍 Tekshirish", callback_data="docx_check"),
-            InlineKeyboardButton(text="💧 Watermark", callback_data="docx_settings"),
-        ],
-        [
-            InlineKeyboardButton(text="👁️ Preview", callback_data="docx_preview"),
-            InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel"),
-        ],
-        [InlineKeyboardButton(text=f"💧 {s['opacity']}% • {STYLE_LABELS.get(s['style'], s['style'])} • {s['text'][:20]}", callback_data="docx_settings")],
-    ])
+    """Word fayli ostida rasm bilan bir xil Web sozlash tugmasi."""
+    pending = _pending_docx_info(chat_id)
+    if not pending:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    session_id = pending.get("session_id")
+    if session_id and WEBAPP_BASE_URL:
+        url = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Tekshirish", url=url)]
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[])
 
 
 def _pending_docx_info(chat_id):
@@ -491,36 +489,43 @@ async def handle_document(message: Message):
     file_bytes = buf.getvalue()
 
     if fname.endswith('.docx'):
-        # Word fayl uchun ham rasm yuborilgandagidek tugmalar aynan bot yuborgan
-        # Word faylining OSTIDA ko'rinadi. Foydalanuvchining original xabarini
-        # Telegram tahrirlashga ruxsat bermaydi, shuning uchun bot faylning
-        # boshqaruv tugmalari bilan o'z nusxasini yuboradi.
+        # DOCX uchun ham rasm yuborilgandagi aynan bir xil UX:
+        # [🔍 Tekshirish] -> mavjud Web App -> watermark sozlamalari.
+        session_id = session_store.new_session_id()
+        session_store.create_session(
+            session_id,
+            message.from_user.id,
+            chat_id,
+            default_filename=os.path.splitext(doc.file_name or "document.docx")[0],
+        )
+        import base64
+        session_store.update_session(
+            session_id,
+            status="docx_ready",
+            input_type="docx",
+            docx_b64=base64.b64encode(file_bytes).decode("ascii"),
+            docx_filename=doc.file_name or "document.docx",
+            watermark_settings=get_watermark_settings(chat_id),
+        )
         _pending_docx[chat_id] = {
             "bytes": file_bytes,
             "file_id": doc.file_id,
             "filename": doc.file_name or "document.docx",
+            "session_id": session_id,
         }
         mirror_path = f"/tmp/{chat_id}_{doc.file_id}_pending.docx"
         try:
             with open(mirror_path, "wb") as f:
                 f.write(file_bytes)
-            caption = (
-                "📄 <b>Word fayl qabul qilindi.</b>\n\n"
-                "Quyidagi tugmalardan foydalaning:\n"
-                "🔍 <b>Tekshirish</b> — rasmlarni tekshiradi va tanlangan watermarkni qo'llaydi.\n"
-                "💧 <b>Watermark</b> — yozuv, uslub, shaffoflik, hajm, shrift va rangni tanlaysiz.\n"
-                "👁️ <b>Preview</b> — natijani oldindan ko'rasiz."
-            )
+            kb = docx_keyboard(chat_id)
             await message.answer_document(
                 FSInputFile(mirror_path, filename=doc.file_name or "document.docx"),
-                caption=caption,
-                reply_markup=docx_keyboard(chat_id),
+                caption="📄 <b>Word fayl qabul qilindi.</b>\n\nPastdagi <b>🔍 Tekshirish</b> tugmasini bosing. U rasm yuborgandagi kabi mavjud Web sozlash sahifasini ochadi.",
+                reply_markup=kb,
             )
         finally:
-            try:
-                os.remove(mirror_path)
-            except Exception:
-                pass
+            try: os.remove(mirror_path)
+            except Exception: pass
 
     elif fname.endswith('.zip'):
         session_id, data = _get_or_create_session(chat_id, message.from_user.id)
@@ -586,12 +591,19 @@ async def docx_preview(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "docx_check")
 async def docx_check(callback: CallbackQuery):
+    # Eski callback_data bilan yuborilgan xabarlar uchun moslik.
     chat_id = callback.message.chat.id
-    if not _pending_docx_info(chat_id):
-        await callback.answer("Word fayl topilmadi. Qaytadan yuboring.", show_alert=True)
-        return
-    await callback.answer("Tekshirish boshlandi...")
-    await _process_pending_docx(chat_id, callback.message)
+    pending = _pending_docx_info(chat_id)
+    if pending and pending.get("session_id") and WEBAPP_BASE_URL:
+        await callback.answer("Web sozlamalar ochilmoqda...")
+        await callback.message.answer(
+            "🔍 Word fayl uchun sozlash sahifasi:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔍 Tekshirish", url=f"{WEBAPP_BASE_URL}/?session_id={pending['session_id']}")
+            ]]),
+        )
+    else:
+        await callback.answer("Web sahifa manzili sozlanmagan.", show_alert=True)
 
 
 @dp.callback_query(F.data == "docx_cancel")
