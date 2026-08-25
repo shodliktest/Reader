@@ -317,168 +317,212 @@ def _session_image_sources(data, docx_mode=False):
 
 
 def _render_emblem_editor(data, docx_mode=True):
-    """V7 alohida Emblem almashtirish sahifasi.
+    """V8 Pro — independent emblem replacement workspace.
 
-    Eski emblema ikki usulda berilishi mumkin:
-      1) alohida rasm sifatida yuklash;
-      2) Word/test rasmining o'zidan cropper bilan belgilash.
-    Ikkinchi usul aynan foydalanuvchi so'ragan "rasmni kesgandek" tanlashdir.
+    The selected old sample defines the replacement unit:
+      • crop only the round emblem -> only the round emblem is replaced;
+      • crop emblem + Telegram icon together -> the whole block is replaced;
+      • if a different image has the same block at another position/size, the
+        detector searches for it automatically.
     """
-    st.title("🏷️ Emblema almashtirish")
-    st.caption("Bu sahifa watermark sozlamalaridan alohida ishlaydi. Eski emblemani yuklashingiz yoki Word/test rasmining o'zidan belgilab olishingiz mumkin.")
+    st.title("🏷️ Emblema almashtirish — PRO V8")
+    st.caption("Emblema almashtirish watermark sahifasidan mustaqil ishlaydi. Qaysi qismni eski namuna sifatida belgilasangiz, aynan o‘sha qism qidiriladi va almashtiriladi.")
 
     sources = _session_image_sources(data, docx_mode=docx_mode)
     if not sources:
-        st.error("❌ Faylda/test rasmlarida emblema tanlash uchun o'qiladigan rasm topilmadi.")
+        st.error("❌ Fayl/test rasmlaridan foydalanish uchun o‘qiladigan rasm topilmadi.")
         return
 
-    # 1) Source / crop
-    st.subheader("1️⃣ Eski emblemani aniqlash")
+    # --- 1. Old sample -------------------------------------------------
+    st.subheader("1️⃣ Eski emblemani qanday ko‘rsatamiz?")
     source_mode = st.radio(
-        "Eski emblema qayerdan olinadi?",
-        ["📤 Alohida rasm yuklash", "✂️ Fayldagi/test rasmdan belgilash"],
+        "Usul",
+        ["📤 Alohida rasm yuklash", "✂️ Fayldagi/test rasmdan kesib belgilash"],
         horizontal=True,
-        key="v7_old_source_mode",
+        key="v8_old_source_mode",
     )
 
     old_bytes = None
+    old_name = ""
     if source_mode.startswith("📤"):
         old_file = st.file_uploader(
-            "Eski emblema rasmini yuklang",
+            "Eski emblema / watermark namunasini yuklang",
             type=["png", "jpg", "jpeg", "webp"],
-            key="v7_old_emblem_file",
-            help="Emblemaning o'zi yoki Telegram belgisi bilan birga almashtiriladigan to'liq belgi qismini yuboring.",
+            key="v8_old_emblem_file",
+            help="Faqat emblem bo‘lsa — faqat emblemni yuboring. Telegram belgisi ham almashtirilsa — ikkalasini birga qamrab olgan rasmni yuboring.",
         )
         if old_file:
             old_bytes = old_file.getvalue()
-            st.image(old_bytes, caption="Eski emblema namunasi", width=260)
+            old_name = old_file.name
     else:
         names = [x["name"] for x in sources]
         idx = st.selectbox(
-            "Emblema bor rasmni tanlang",
+            "Emblema bor rasm",
             range(len(names)),
             format_func=lambda i: f"{i+1}. {names[i]}" + (" ⚠️ CRC" if sources[i].get("crc_bad") else ""),
-            key="v7_crop_source_idx",
+            key="v8_crop_source_idx",
         )
         src = sources[idx]["data"]
-        src_img = Image.open(io.BytesIO(src)).convert("RGB")
-        st.caption("🖱️ Pastdagi oynada faqat eski emblema qismini belgilang. Telegram belgisi ham birga almashtirilsa, ikkalasini birga qamrab oling.")
+        try:
+            src_img = Image.open(io.BytesIO(src)).convert("RGB")
+        except Exception as exc:
+            st.error(f"❌ Rasmni ochib bo‘lmadi: {exc}")
+            return
+        st.info("💡 Muhim: Telegram belgisi va dumaloq emblema birga almashtirilsa, **ikkalasini bitta quti ichiga birga oling**. Faqat dumaloq emblema almashtirilsa, faqat uni qirqing.")
         if _CROPPER_AVAILABLE:
+            crop_key = f"v8_emblem_cropper_{idx}_{sources[idx]['name']}"
             crop = st_cropper(
                 src_img,
                 realtime_update=True,
                 box_color="#ff4b4b",
                 aspect_ratio=None,
                 return_type="image",
-                key="v7_emblem_cropper",
+                key=crop_key,
             )
             if crop is not None:
-                cbuf = io.BytesIO(); crop.convert("RGB").save(cbuf, format="PNG")
-                if st.button("📌 Belgilangan qismni eski emblema sifatida qabul qilish", use_container_width=True, type="primary", key="v7_accept_crop"):
-                    st.session_state["v7_old_template_b64"] = base64.b64encode(cbuf.getvalue()).decode("ascii")
-                    st.session_state["v7_old_template_name"] = f"crop:{sources[idx]['name']}"
-                    st.rerun()
+                cbuf = io.BytesIO(); crop.convert("RGBA").save(cbuf, format="PNG")
+                crop_bytes = cbuf.getvalue()
+                st.image(crop_bytes, caption="Tanlanayotgan eski namuna", width=280)
+                a, b = st.columns(2)
+                with a:
+                    if st.button("✅ Shu qismni qabul qilish", use_container_width=True, type="primary", key="v8_accept_crop"):
+                        st.session_state["v8_old_template_b64"] = base64.b64encode(crop_bytes).decode("ascii")
+                        st.session_state["v8_old_template_name"] = f"crop:{sources[idx]['name']}"
+                        st.rerun()
+                with b:
+                    if st.button("🗑️ Tanlangan namunani tozalash", use_container_width=True, key="v8_clear_crop"):
+                        st.session_state.pop("v8_old_template_b64", None)
+                        st.session_state.pop("v8_old_template_name", None)
+                        st.rerun()
         else:
-            st.warning("streamlit-cropper o'rnatilmagan. requirements.txt dagi streamlit-cropper ni o'rnatib, sahifani qayta ishga tushiring.")
+            st.warning("streamlit-cropper o‘rnatilmagan. requirements.txt dagi streamlit-cropper ni o‘rnating.")
 
-        saved = st.session_state.get("v7_old_template_b64")
+        saved = st.session_state.get("v8_old_template_b64")
         if saved:
             old_bytes = base64.b64decode(saved)
-            st.success(f"✅ Eski emblema belgilandi: {st.session_state.get('v7_old_template_name','crop')}")
-            st.image(old_bytes, caption="Tanlangan eski emblema", width=260)
-            if st.button("🗑️ Tanlangan emblemani tozalash", key="v7_clear_old"):
-                st.session_state.pop("v7_old_template_b64", None)
-                st.session_state.pop("v7_old_template_name", None)
-                st.rerun()
+            old_name = st.session_state.get("v8_old_template_name", "crop")
 
+    if old_bytes:
+        st.success(f"✅ Eski namuna tayyor: {old_name}")
+        st.image(old_bytes, caption="Eski namuna — tizim aynan shu blokni qidiradi", width=300)
+        st.caption("Agar namuna ichida qora/oq fon qolgan bo‘lsa ham V8 uni avtomatik chetga chiqarishga harakat qiladi. Eng yaxshi natija: shaffof PNG.")
+
+    # --- 2. New sample -------------------------------------------------
     st.subheader("2️⃣ Yangi emblema")
     new_file = st.file_uploader(
         "Yangi emblemani yuklang",
         type=["png", "jpg", "jpeg", "webp"],
-        key="v7_new_emblem_file",
-        help="Shaffof PNG tavsiya etiladi.",
+        key="v8_new_emblem_file",
+        help="Shaffof PNG tavsiya etiladi. Yangi rasmning o‘zida ortiqcha katta bo‘sh fon bo‘lmasin.",
     )
     new_bytes = new_file.getvalue() if new_file else None
     if new_bytes:
-        st.image(new_bytes, caption="Yangi emblema", width=260)
+        st.image(new_bytes, caption="Yangi emblema", width=300)
 
-    st.subheader("3️⃣ O'lcham va aniqlik")
+    # --- 3. Size/quality controls -------------------------------------
+    st.subheader("3️⃣ O‘lcham, tozalash va aniqlik")
     c1, c2, c3 = st.columns(3)
     with c1:
-        scale = st.slider("📐 Eski emblema o'lchamiga qo'shimcha", 0, 40, 8, 1, key="v7_emblem_scale")
+        scale = st.slider("📐 Eski o‘lchamga qo‘shimcha", -10, 35, 8, 1, key="v8_emblem_scale")
     with c2:
-        opacity = st.slider("👻 Shaffoflik", 10, 100, 100, 1, key="v7_emblem_opacity")
+        opacity = st.slider("👻 Shaffoflik", 10, 100, 100, 1, key="v8_emblem_opacity")
     with c3:
-        confidence = st.slider("🎯 Minimal ishonch", 40, 95, 58, 1, key="v7_emblem_conf")
+        confidence = st.slider("🎯 Minimal ishonch", 45, 95, 58, 1, key="v8_emblem_conf")
 
-    readable = sources
+    c4, c5 = st.columns(2)
+    with c4:
+        stretch = st.checkbox("📏 Yangi emblemani aniqlangan qutiga to‘liq moslashtirish", value=False, key="v8_emblem_stretch",
+                              help="O‘chirilsa, yangi rasm proporsiyasi saqlanadi. Yoqilsa, yangi rasm aniqlangan eski blokni to‘liq yopadi.")
+    with c5:
+        cleanup = st.slider("🧽 Eski belgini tozalash zaxirasi", 0, 15, 6, 1, key="v8_cleanup_padding",
+                            help="Eski Telegram/emblem chetida qolib ketmasligi uchun aniqlangan qutidan necha foiz tashqariga tozalash.")
+
     if old_bytes and new_bytes:
-        names = [x["name"] for x in readable]
+        st.divider()
+        # --- 4. Preview ------------------------------------------------
+        st.subheader("4️⃣ Tekshirish va Preview")
+        names = [x["name"] for x in sources]
         idx = st.selectbox(
-            "4️⃣ Tekshirish/Preview uchun rasm",
+            "Preview uchun rasm",
             range(len(names)),
-            format_func=lambda i: f"{i+1}. {names[i]}" + (" ⚠️ CRC tiklangan" if readable[i].get("crc_bad") else ""),
-            key="v7_preview_image_idx",
+            format_func=lambda i: f"{i+1}. {names[i]}" + (" ⚠️ CRC tiklangan" if sources[i].get("crc_bad") else ""),
+            key="v8_preview_image_idx",
         )
-        target = readable[idx]["data"]
+        target = sources[idx]["data"]
+
         a, b = st.columns(2)
         with a:
-            if st.button("🔍 Emblemani avtomatik topish", use_container_width=True, key="v7_detect"):
+            if st.button("🔍 Emblemani avtomatik topish", use_container_width=True, key="v8_detect"):
                 det = detect_emblem(old_bytes, target, min_confidence=confidence/100.0)
                 if det.found:
                     st.image(annotate_detection(target, det), caption=f"✅ Topildi • {det.confidence:.0%} • {det.method}", use_container_width=True)
-                    st.success(f"Joylashuv: x={det.x}, y={det.y}, o'lcham {det.w}×{det.h}px")
+                    st.success(f"📍 x={det.x}, y={det.y} • {det.w}×{det.h}px • {det.reason}")
+                    st.caption("🟢 Qizil/yashil quti — aynan shu qism almashtiriladi. Namuna birga olingan bo‘lsa, quti ham birga bo‘ladi.")
                 else:
                     st.warning(f"⚠️ Topilmadi: {det.reason}")
         with b:
-            if st.button("👁️ Almashtirish Preview", use_container_width=True, type="primary", key="v7_preview"):
-                out_img, det = replace_emblem_on_image(target, old_bytes, new_bytes, scale_percent=scale, opacity=opacity, min_confidence=confidence/100.0)
+            if st.button("👁️ Almashtirish Preview", use_container_width=True, type="primary", key="v8_preview"):
+                out_img, det = replace_emblem_on_image(
+                    target, old_bytes, new_bytes,
+                    scale_percent=scale, opacity=opacity,
+                    min_confidence=confidence/100.0,
+                    stretch=stretch, clean_old=True, cleanup_padding=cleanup,
+                )
                 if det.found:
                     x1, x2 = st.columns(2)
-                    with x1: st.image(target, caption="OLD", use_container_width=True)
-                    with x2: st.image(out_img, caption=f"NEW • +{scale}%", use_container_width=True)
-                    st.success(f"✅ Preview tayyor • {det.confidence:.0%}")
+                    with x1: st.image(target, caption=f"OLD • {det.w}×{det.h}px", use_container_width=True)
+                    with x2: st.image(out_img, caption=f"NEW • +{scale}% • {det.confidence:.0%}", use_container_width=True)
+                    st.success("✅ Preview tayyor. Eski blok avval tozalandi, keyin yangi emblema joylashtirildi.")
                 else:
                     st.warning(f"⚠️ Bu rasmda emblema topilmadi: {det.reason}")
 
-        if st.button("📊 Barcha Word rasmlarida tekshirish", use_container_width=True, key="v7_scan_all"):
+        if st.button("📊 Barcha Word rasmlarida tekshirish", use_container_width=True, key="v8_scan_all"):
             found = missing = 0
             progress = st.progress(0)
             rows = []
-            for i, item in enumerate(readable, 1):
+            for i, item in enumerate(sources, 1):
                 det = detect_emblem(old_bytes, item["data"], min_confidence=confidence/100.0)
                 if det.found:
                     found += 1
-                    rows.append(f"✅ {item['name']} — {det.confidence:.0%}")
+                    rows.append(f"✅ {item['name']} — {det.confidence:.0%} • {det.w}×{det.h} • {det.method}")
                 else:
                     missing += 1
-                    rows.append(f"⚠️ {item['name']} — topilmadi")
-                progress.progress(i / len(readable))
-            st.success(f"Tekshiruv: {len(readable)} ta • ✅ {found} topildi • ⚠️ {missing} topilmadi")
-            with st.expander("Batafsil natija"):
+                    rows.append(f"⚠️ {item['name']} — topilmadi • {det.reason}")
+                progress.progress(i / len(sources))
+            st.success(f"Tekshiruv: {len(sources)} ta • ✅ {found} topildi • ⚠️ {missing} topilmadi")
+            with st.expander("Batafsil natija", expanded=True):
                 st.text("\n".join(rows))
 
+        # --- 5. Apply ---------------------------------------------------
         st.divider()
         st.subheader("5️⃣ Yakuniy almashtirish")
-        st.info("Emblema rasmlarning turli joylarida bo'lishi mumkin. Tizim har bir rasmda alohida qidiradi; bitta rasm topilmasa, qolganlari davom etadi.")
-        if st.button("🏷️ Emblemani barcha Word rasmlariga almashtirish", use_container_width=True, type="primary", key="v7_apply"):
+        st.info("🔒 Har bir Word rasmi mustaqil tekshiriladi. Bir rasmda CRC yoki detection xatosi bo‘lsa ham qolgan rasmlar davom etadi. Namuna faqat emblem bo‘lsa — faqat emblem; emblem + Telegram birga tanlangan bo‘lsa — ikkalasi birga almashtiriladi.")
+        if st.button("🏷️ Emblemani barcha Word rasmlariga almashtirish", use_container_width=True, type="primary", key="v8_apply"):
             in_path = f"/tmp/{data['session_id']}_emblem_input.docx"
             out_path = f"/tmp/{data['session_id']}_emblem_output.docx"
             try:
                 docx_bytes = base64.b64decode(data.get("docx_b64", ""))
                 with open(in_path, "wb") as f:
                     f.write(docx_bytes)
-                with st.spinner("🔍 Har bir rasmda emblema topilmoqda va almashtirilmoqda..."):
-                    report = replace_emblems_in_docx(in_path, out_path, old_bytes, new_bytes, scale_percent=scale, opacity=opacity, min_confidence=confidence/100.0)
-                ok = send_docx_to_telegram(data.get("telegram_chat_id"), out_path, data.get("default_filename", "emblem_replaced.docx"), session_id=data["session_id"])
+                with st.spinner("🔍 Har bir Word rasmini tekshirish, eski belgini tozalash va yangi emblemani joylashtirish..."):
+                    report = replace_emblems_in_docx(
+                        in_path, out_path, old_bytes, new_bytes,
+                        scale_percent=scale, opacity=opacity,
+                        min_confidence=confidence/100.0,
+                        stretch=stretch, clean_old=True, cleanup_padding=cleanup,
+                    )
+                ok = send_docx_to_telegram(
+                    data.get("telegram_chat_id"), out_path,
+                    data.get("default_filename", "emblem_replaced.docx"),
+                    session_id=data["session_id"],
+                )
                 if ok:
-                    st.success(f"✅ Tayyor! {report['found']} ta rasmda almashtirildi. Topilmagan: {report['not_found']}. CRC tiklangan: {report['repaired']}.")
-                    if report.get("not_found"):
-                        with st.expander("⚠️ Topilmagan rasmlar"):
+                    st.success(f"✅ Tayyor! {report['found']} ta rasmda almashtirildi • Topilmagan: {report['not_found']} • CRC tiklangan: {report['repaired']} • Xatolik: {report['failed']}")
+                    if report.get("not_found") or report.get("failed"):
+                        with st.expander("⚠️ Tafsilotlar"):
                             for d in report["details"]:
-                                if d.get("status") == "not_found":
-                                    st.write(f"• {d['name']} — {d.get('reason','')}")
-                    # Sessiyani ochiq qoldiramiz: foydalanuvchi keyin watermark sahifasiga ham o'tishi mumkin.
+                                if d.get("status") != "replaced":
+                                    st.write(f"• {d['name']} — {d.get('status')} — {d.get('reason','')}")
                     session_store.update_session(data["session_id"], status="ready_for_review")
             except Exception as e:
                 st.error(f"❌ Emblemalarni almashtirishda xatolik: {e}")
@@ -487,7 +531,7 @@ def _render_emblem_editor(data, docx_mode=True):
                     try: os.remove(pp)
                     except Exception: pass
     else:
-        st.warning("⬆️ Eski emblemani yuklang yoki rasm ichidan belgilang, keyin yangi emblemani yuklang.")
+        st.warning("⬆️ Avval eski namuna (yuklash yoki rasmdan kesish) va yangi emblemani bering.")
 
 def _render_watermark_editor(data, docx_mode=False):
     """Shared watermark editor for image sessions and DOCX sessions.
