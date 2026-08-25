@@ -55,8 +55,9 @@ if _THIS_DIR not in sys.path:
 
 import session_store
 from docx_builder import build_docx
-from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes, watermark_docx
+from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes, extract_docx_media_tolerant, watermark_docx, STYLE_LABELS, FONT_LABELS
 from processor import detect_photo_region
+from emblem import detect_emblem, replace_emblem_on_image, replace_emblems_in_docx, annotate_detection
 
 # Streamlit Cloud'da API kalitlar "Secrets" bo'limida saqlanadi (st.secrets),
 # lekin bot.py va processor.py bularni oddiy os.environ orqali o'qiydi -
@@ -273,113 +274,257 @@ def send_docx_to_telegram(chat_id, file_path, filename):
     return True
 
 
+def _render_watermark_editor(data, docx_mode=False):
+    """Shared watermark editor for image sessions and DOCX sessions.
 
-def _docx_first_image_bytes(raw):
-    """DOCX ichidagi birinchi rasmni CRC muammosiga chidamli tarzda olish."""
-    import zipfile, tempfile, os
-    with zipfile.ZipFile(io.BytesIO(raw), "r") as z:
-        names = [n for n in z.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}]
-        if not names:
-            return None
-        try:
-            return z.read(names[0])
-        except Exception:
-            inp = f"/tmp/docx_preview_{os.getpid()}.docx"
-            out = f"/tmp/docx_preview_fixed_{os.getpid()}.docx"
-            with open(inp, "wb") as f: f.write(raw)
-            try:
-                watermark_docx(inp, out, {**DEFAULT_SETTINGS, "enabled": False})
-                with zipfile.ZipFile(out, "r") as fixed:
-                    names2 = [n for n in fixed.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}]
-                    return fixed.read(names2[0]) if names2 else None
-            finally:
-                for x in (inp, out):
-                    try: os.remove(x)
-                    except Exception: pass
+    DOCX mode reads media through extract_docx_media_tolerant(), so a single
+    stale CRC (for example word/media/image14.jpeg) never prevents preview of
+    the other usable images.
+    """
+    if docx_mode:
+        docx_bytes = base64.b64decode(data.get("docx_b64", ""))
+        media_entries = extract_docx_media_tolerant(docx_bytes)
+        readable = [m for m in media_entries if m.get("data")]
+        if not readable:
+            st.error("❌ Word fayl ichidan o'qiladigan rasm topilmadi.")
+            bad = [m["name"] for m in media_entries]
+            if bad:
+                st.caption("Tekshirilgan rasmlar: " + ", ".join(bad[:8]))
+            return
+        data["_docx_media_entries"] = readable
+        questions = [{"image_b64": base64.b64encode(m["data"]).decode("ascii")} for m in readable]
+    else:
+        questions = data.get("questions", [])
 
+    wm_initial = normalize_settings(data.get("watermark_settings", DEFAULT_SETTINGS))
+    for _k, _v in wm_initial.items():
+        st.session_state.setdefault(f"wm_{_k}", _v)
+    st.session_state.setdefault("wm_show_preview", False)
 
-def docx_watermark_editor(session_id, data):
-    """Rasm oqimidagi Web editorning aynan o'zi, faqat input DOCX."""
-    import base64, os, tempfile
-    raw = base64.b64decode(data.get("docx_b64", ""))
-    filename = data.get("docx_filename", "document.docx")
-    if not raw:
-        st.error("❌ Word fayl ma'lumotlari topilmadi.")
-        return
+    st.subheader("💧 Rasm Watermark — to'liq sozlash")
+    st.caption("Watermark Word sahifasiga emas, Word ichidagi rasmlarning O'ZIGA qo'yiladi." if docx_mode else "Watermark Word sahifasiga emas, Word ichidagi rasmlarning O'ZIGA qo'yiladi.")
 
-    st.title("💧 Word Watermark Editor")
-    st.caption(f"📄 {filename} — watermark Word sahifasiga emas, ichidagi rasmlarning o'ziga qo'yiladi.")
-
-    initial = normalize_settings(data.get("watermark_settings", DEFAULT_SETTINGS))
-    for k, v in initial.items():
-        st.session_state.setdefault(f"docx_wm_{k}", v)
-
-    enabled = st.checkbox("Watermarkni yoqish", key="docx_wm_enabled")
-    presets = ["✏️ Maxsus matn", "© QuizMaker Bot", "QUIZMAKER", "@MyTestBot", "CONFIDENTIAL", "SAMPLE"]
-    current = st.session_state.get("docx_wm_text", DEFAULT_SETTINGS["text"])
-    idx = presets.index(current) if current in presets else 0
-    preset = st.selectbox("📝 Yozuv namunasi", presets, index=idx, key="docx_wm_preset")
+    wm_enabled = st.checkbox("Watermarkni yoqish", key="wm_enabled")
+    preset_names = ["✏️ Maxsus matn", "© QuizMaker Bot", "QUIZMAKER", "@MyTestBot", "CONFIDENTIAL", "SAMPLE"]
+    current_text = st.session_state.get("wm_text", DEFAULT_SETTINGS["text"])
+    preset_index = 0 if current_text not in preset_names[1:] else preset_names.index(current_text)
+    preset = st.selectbox("📝 Yozuv namunasi", preset_names, index=preset_index, key="wm_preset")
     if preset != "✏️ Maxsus matn":
-        st.session_state["docx_wm_text"] = preset
-    text = st.text_input("✏️ Watermark yozuvi", key="docx_wm_text", max_chars=120)
+        st.session_state["wm_text"] = preset
+    wm_text = st.text_input("✏️ Watermark yozuvi", key="wm_text", max_chars=120)
 
     style_options = {"Diagonal":"diagonal","Markaziy":"center","Takrorlanuvchi":"pattern","Burchak":"corner","Ikki diagonal":"double","Stamp":"stamp","Kontur":"outline"}
-    current_style = st.session_state.get("docx_wm_style", DEFAULT_SETTINGS["style"])
-    labels = list(style_options.keys())
-    current_label = next((k for k,v in style_options.items() if v == current_style), labels[0])
-    style_label = st.selectbox("🎨 Uslub / dizayn", labels, index=labels.index(current_label), key="docx_wm_style_label")
-    opacity = st.slider("👻 Shaffoflik (%)", 1, 100, int(st.session_state.get("docx_wm_opacity", 18)), key="docx_wm_opacity")
-    size = st.slider("🔠 Yozuv hajmi", 8, 180, int(st.session_state.get("docx_wm_size", 30)), 2, key="docx_wm_size")
-    angle = st.slider("📐 Burchak", -180, 180, int(st.session_state.get("docx_wm_angle", -35)), 5, key="docx_wm_angle")
-    color = st.color_picker("🎨 Yozuv rangi", value=st.session_state.get("docx_wm_color", "#FFFFFF"), key="docx_wm_color")
-    font_labels = ["Sans", "Serif", "Mono"]
-    fmap = {"Sans":"sans","Serif":"serif","Mono":"mono"}
-    font = st.selectbox("🔤 Shrift", font_labels, index=font_labels.index(next((x for x in font_labels if fmap[x] == st.session_state.get("docx_wm_font","sans")), "Sans")), key="docx_wm_font_label")
-    bold = st.checkbox("Qalin yozuv", key="docx_wm_bold")
-    gap = st.slider("↔️ Pattern oralig'i", 40, 600, int(st.session_state.get("docx_wm_pattern_gap", 180)), 10, key="docx_wm_pattern_gap")
-    stroke = st.slider("🖊 Kontur qalinligi", 0, 12, int(st.session_state.get("docx_wm_stroke", 0)), key="docx_wm_stroke")
+    reverse_style = {v:k for k,v in style_options.items()}
+    current_style_label = reverse_style.get(st.session_state.get("wm_style", "diagonal"), "Diagonal")
+    c1,c2,c3=st.columns(3)
+    with c1:
+        wm_style_label=st.selectbox("🎨 Uslub / dizayn", list(style_options.keys()), index=list(style_options.keys()).index(current_style_label), key="wm_style_label")
+    with c2:
+        wm_opacity=st.slider("👻 Shaffoflik (%)",1,100,int(st.session_state.get("wm_opacity",18)),1,key="wm_opacity")
+    with c3:
+        wm_size=st.slider("🔠 Yozuv hajmi",8,120,int(st.session_state.get("wm_size",30)),2,key="wm_size")
+    c4,c5,c6=st.columns(3)
+    with c4:
+        wm_angle=st.slider("📐 Burchak",-180,180,int(st.session_state.get("wm_angle",-35)),5,key="wm_angle")
+    with c5:
+        wm_color=st.color_picker("🎨 Yozuv rangi",value=st.session_state.get("wm_color","#FFFFFF"),key="wm_color")
+    with c6:
+        wm_font_label=st.selectbox("🔤 Shrift",["Sans","Serif","Mono"],index={"sans":0,"serif":1,"mono":2}.get(st.session_state.get("wm_font","sans"),0),key="wm_font_label")
+    c7,c8,c9=st.columns(3)
+    with c7:
+        wm_bold=st.checkbox("B 🔥 Qalin yozuv",value=bool(st.session_state.get("wm_bold",True)),key="wm_bold")
+    with c8:
+        wm_stroke=st.slider("🖊️ Kontur qalinligi",0,10,int(st.session_state.get("wm_stroke",0)),1,key="wm_stroke")
+    with c9:
+        wm_gap=st.slider("↔️ Pattern oralig'i",40,500,int(st.session_state.get("wm_pattern_gap",180)),10,key="wm_pattern_gap")
 
-    settings = normalize_settings({"enabled":enabled,"text":text,"style":style_options[style_label],"opacity":opacity,"size":size,"angle":angle,"color":color,"font":fmap[font],"bold":bold,"pattern_gap":gap,"stroke":stroke})
-    session_store.update_session(session_id, watermark_settings=settings)
+    st.session_state["wm_style"]=style_options[wm_style_label]
+    font_map={"Sans":"sans","Serif":"serif","Mono":"mono"}
+    wm_settings=normalize_settings({"enabled":wm_enabled,"text":wm_text,"style":st.session_state["wm_style"],"opacity":wm_opacity,"angle":wm_angle,"size":wm_size,"color":wm_color,"bold":wm_bold,"font":font_map[wm_font_label],"stroke":wm_stroke,"pattern_gap":wm_gap})
+    session_store.update_session(data["session_id"], watermark_settings=wm_settings)
 
-    st.divider()
-    st.subheader("👁️ Preview")
-    try:
-        img_bytes = _docx_first_image_bytes(raw)
-        if img_bytes:
-            st.image(preview_bytes(img_bytes, settings), use_container_width=True, caption=f"{style_label} • {opacity}% • {text}")
+    # ------------------------------------------------------------------
+    # V6 — EMBLEM AUTO-DETECTION / REPLACEMENT
+    # ------------------------------------------------------------------
+    if docx_mode:
+        st.divider()
+        st.subheader("🏷️ Emblemani avtomatik topish va almashtirish")
+        st.caption(
+            "Word ichidagi rasmlarda emblemalar turli joylarda bo'lsa ham, bitta namuna orqali "
+            "avtomatik topiladi. SIFT/ORB + multi-scale matching ishlatiladi."
+        )
+        e1, e2 = st.columns(2)
+        with e1:
+            old_file = st.file_uploader(
+                "1️⃣ Eski emblema namunasini yuklang",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="v6_old_emblem",
+                help="Faqat almashtiriladigan emblemaga imkon qadar yaqin namuna yuboring. Telegram belgisi ham emblema tarkibida bo'lsa, namuna ikkalasini ham qamrab olsin.",
+            )
+        with e2:
+            new_file = st.file_uploader(
+                "2️⃣ Yangi emblemani yuklang",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="v6_new_emblem",
+                help="Shaffof PNG tavsiya etiladi.",
+            )
+
+        e3, e4, e5 = st.columns(3)
+        with e3:
+            emblem_scale = st.slider("📐 O'lcham (originaldan katta)", 0, 30, 8, 1, key="v6_emblem_scale")
+        with e4:
+            emblem_opacity = st.slider("👻 Shaffoflik", 10, 100, 100, 1, key="v6_emblem_opacity")
+        with e5:
+            emblem_conf = st.slider("🎯 Minimal ishonch", 50, 90, 58, 1, key="v6_emblem_conf")
+
+        if old_file and new_file:
+            old_bytes = old_file.getvalue()
+            new_bytes = new_file.getvalue()
+            readable_items = [m for m in media_entries if m.get("data")]
+            names = [m["name"] for m in readable_items]
+            sel_idx = st.selectbox(
+                "👁️ Preview uchun rasm",
+                range(len(names)),
+                format_func=lambda i: f"{i+1}. {names[i]}",
+                key="v6_emblem_preview_idx",
+            ) if names else None
+
+            ep1, ep2 = st.columns(2)
+            with ep1:
+                if st.button("🔍 Emblemani topish", use_container_width=True, key="v6_detect_one"):
+                    if sel_idx is not None:
+                        det = detect_emblem(old_bytes, readable_items[sel_idx]["data"], min_confidence=emblem_conf/100.0)
+                        st.session_state["v6_last_det"] = det.to_dict()
+                        if det.found:
+                            marked = annotate_detection(readable_items[sel_idx]["data"], det)
+                            st.image(marked, caption=f"✅ Topildi • {det.confidence:.0%} • {det.method}", use_container_width=True)
+                            st.success(f"Emblema topildi: x={det.x}, y={det.y}, {det.w}×{det.h}px")
+                        else:
+                            st.warning(f"⚠️ Topilmadi: {det.reason}")
+            with ep2:
+                if st.button("👁️ Almashtirish Preview", use_container_width=True, key="v6_preview_one"):
+                    if sel_idx is not None:
+                        out_img, det = replace_emblem_on_image(
+                            readable_items[sel_idx]["data"], old_bytes, new_bytes,
+                            scale_percent=emblem_scale, opacity=emblem_opacity,
+                            min_confidence=emblem_conf/100.0,
+                        )
+                        if det.found:
+                            a, b = st.columns(2)
+                            with a:
+                                st.image(readable_items[sel_idx]["data"], caption="OLD", use_container_width=True)
+                            with b:
+                                st.image(out_img, caption=f"NEW • +{emblem_scale}%", use_container_width=True)
+                            st.success(f"✅ Almashtirish preview tayyor • {det.confidence:.0%}")
+                        else:
+                            st.warning(f"⚠️ Bu rasmda emblema topilmadi: {det.reason}")
+
+            if st.button("📊 Barcha rasmlarda emblemani tekshirish", use_container_width=True, key="v6_scan_all"):
+                found_count = 0
+                not_found_count = 0
+                repaired_count = sum(1 for m in readable_items if m.get("crc_bad"))
+                progress = st.progress(0)
+                for idx, item in enumerate(readable_items, 1):
+                    det = detect_emblem(old_bytes, item["data"], min_confidence=emblem_conf/100.0)
+                    if det.found:
+                        found_count += 1
+                    else:
+                        not_found_count += 1
+                    progress.progress(idx / max(1, len(readable_items)))
+                st.success(
+                    f"🔎 Tekshiruv: {len(readable_items)} ta rasm • "
+                    f"✅ topildi {found_count} • ⚠️ topilmadi {not_found_count} • ♻️ CRC {repaired_count}"
+                )
+
+            st.info(
+                "💡 Agar emblema joyi har xil bo'lsa ham muammo emas. Namuna emblemaning o'zi (va agar u bilan "
+                "birga Telegram belgisi almashtirilishi kerak bo'lsa, ikkalasi birga) bo'lishi kerak."
+            )
+
+            if st.button("🏷️ Emblemani BARCHA Word rasmlariga qo'llash", use_container_width=True, type="primary", key="v6_apply_emblem"):
+                import os, tempfile
+                in_path = f"/tmp/{data['session_id']}_emblem_input.docx"
+                out_path = f"/tmp/{data['session_id']}_emblem_output.docx"
+                try:
+                    with open(in_path, "wb") as f:
+                        f.write(docx_bytes)
+                    with st.spinner("🔍 Emblemalar topilmoqda va Word rasmlari qayta ishlanmoqda..."):
+                        report = replace_emblems_in_docx(
+                            in_path, out_path, old_bytes, new_bytes,
+                            scale_percent=emblem_scale, opacity=emblem_opacity,
+                            min_confidence=emblem_conf/100.0,
+                        )
+                    ok = send_docx_to_telegram(
+                        data.get("telegram_chat_id"), out_path,
+                        data.get("default_filename", "emblem_replaced.docx"),
+                    )
+                    if ok:
+                        st.success(
+                            f"✅ Tayyor! {report['found']} ta rasmda emblema almashtirildi. "
+                            f"Topilmagan: {report['not_found']}. CRC tiklangan: {report['repaired']}."
+                        )
+                        if report["not_found"]:
+                            with st.expander("⚠️ Emblema topilmagan rasmlar"):
+                                for d in report["details"]:
+                                    if d.get("status") == "not_found":
+                                        st.write(f"• {d['name']} — {d.get('reason','')}")
+                        session_store.update_session(data["session_id"], status="done")
+                except Exception as e:
+                    st.error(f"❌ Emblemalarni almashtirishda xatolik: {e}")
+                finally:
+                    for pp in (in_path, out_path):
+                        try:
+                            os.remove(pp)
+                        except Exception:
+                            pass
         else:
-            st.info("Word ichida preview qilish uchun rasm topilmadi.")
-    except Exception as e:
-        st.warning(f"Preview vaqtida rasm o'qilmadi: {e}")
+            st.warning("⬆️ Avval eski emblema namunasini va yangi emblemani yuklang.")
+
+    readable_count=len(readable) if docx_mode else sum(1 for q in questions if q.get("image_b64"))
+    st.caption(f"🖼️ Preview manbasi: {readable_count} ta o'qiladigan rasm. CRC xatosi bor rasm bo'lsa ham qolganlari ko'rsatiladi.")
+    preview_source=questions[0].get("image_b64") if questions else None
+    p1,p2,p3=st.columns(3)
+    with p1:
+        if st.button("👁️ Preview",use_container_width=True,type="primary"):
+            st.session_state["wm_show_preview"]=True
+    with p2:
+        if st.button("🔄 Standart",use_container_width=True):
+            for k,v in DEFAULT_SETTINGS.items(): st.session_state[f"wm_{k}"]=v
+            st.rerun()
+    with p3:
+        if st.button("🙈 Yopish",use_container_width=True): st.session_state["wm_show_preview"]=False
+
+    if st.session_state.get("wm_show_preview") and preview_source:
+        try:
+            st.image(preview_bytes(base64.b64decode(preview_source),wm_settings),caption=f"👁️ Preview • {wm_text} • {wm_style_label} • {wm_opacity}%",use_container_width=True)
+            if docx_mode:
+                bad=[m["name"] for m in media_entries if m.get("data") is None]
+                repaired=[m["name"] for m in media_entries if m.get("crc_bad") and m.get("data") is not None]
+                if repaired: st.info(f"♻️ CRC tuzatilgan holda o'qildi: {', '.join(repaired[:3])}" + (" …" if len(repaired)>3 else ""))
+                if bad: st.warning(f"⚠️ Haqiqatan o'qilmaydigan rasm(lar) o'tkazib yuborildi: {', '.join(bad[:3])}" + (" …" if len(bad)>3 else ""))
+        except Exception as e:
+            st.warning(f"Preview yaratilmadi: {e}")
 
     st.divider()
-    if st.button("💧 Watermarkni Word rasmlariga qo‘llash", type="primary", use_container_width=True):
-        if not enabled:
-            st.warning("Avval Watermarkni yoqing.")
-            return
-        inp = f"/tmp/{session_id}_source.docx"
-        out = f"/tmp/{session_id}_watermarked.docx"
-        try:
-            with open(inp, "wb") as f: f.write(raw)
-            with st.spinner("Word ichidagi barcha rasmlar tekshirilmoqda va watermark qo‘llanmoqda..."):
-                _, changed = watermark_docx(inp, out, settings)
-                chat_id = data.get("telegram_chat_id")
-                ok = send_docx_to_telegram(chat_id, out, filename)
-            if ok:
-                report = getattr(watermark_docx, "last_report", {}) or {}
-                st.success(f"✅ Tayyor! {changed} ta rasmga watermark qo‘yildi.")
-                if report.get("repaired"):
-                    st.info(f"♻️ {report['repaired']} ta muammoli rasm qayta tiklandi.")
-                session_store.clear_session(session_id)
-            else:
-                st.error("❌ Word fayl Telegram'ga yuborilmadi.")
-        except Exception as e:
-            st.error(f"❌ Word faylni qayta ishlashda xatolik: {e}")
-        finally:
-            for x in (inp, out):
-                try: os.remove(x)
-                except Exception: pass
+    if docx_mode:
+        if st.button("💧 Watermarkni Word rasmlariga qo'llash",use_container_width=True,type="primary"):
+            import tempfile, os
+            in_path=f"/tmp/{data['session_id']}_input.docx"; out_path=f"/tmp/{data['session_id']}_watermarked.docx"
+            try:
+                with open(in_path,"wb") as f: f.write(docx_bytes)
+                watermark_docx(in_path,out_path,wm_settings)
+                report=getattr(watermark_docx,"last_report",{}) or {}
+                ok=send_docx_to_telegram(data.get("telegram_chat_id"),out_path,data.get("default_filename","watermarked.docx"))
+                if ok:
+                    st.success(f"✅ Word tayyor. {report.get('changed',0)} ta rasm watermarklandi; ♻️ CRC: {report.get('repaired',0)}")
+                    session_store.update_session(data["session_id"],status="done")
+            except Exception as e:
+                st.error(f"❌ Wordni qayta ishlashda xatolik: {e}")
+            finally:
+                for pp in (in_path,out_path):
+                    try: os.remove(pp)
+                    except Exception: pass
+    return
 
 def main():
     ensure_bot_running()
@@ -412,8 +557,10 @@ def main():
         st.success("Bu partiya allaqachon yakunlangan. Word fayl chatga yuborilgan.")
         return
 
-    if data.get("input_type") == "docx":
-        docx_watermark_editor(session_id, data)
+    if data.get("mode") == "docx" and data.get("docx_b64"):
+        st.title("📄 Word faylni tekshirish")
+        st.caption(f"Fayl: {data.get('default_filename','document.docx')}")
+        _render_watermark_editor(data, docx_mode=True)
         return
 
     questions = data.get("questions", [])
@@ -496,7 +643,26 @@ def main():
         "pattern_gap": wm_gap,
     })
 
-    preview_source = next((q.get("image_b64") for q in questions if q.get("image_b64")), None)
+    # Preview uchun faqat birinchi rasmga bog'lanib qolmaymiz.  Biror rasm
+    # (masalan DOCX ichidagi image14.jpeg) CRC yoki boshqa sabab bilan
+    # o'qilmasa, keyingi sog'lom rasmga o'tamiz.
+    preview_candidates = [q.get("image_b64") for q in questions if q.get("image_b64")]
+    preview_source = None
+    preview_source_index = None
+    preview_errors = []
+    for _idx, _candidate in enumerate(preview_candidates):
+        try:
+            _raw = base64.b64decode(_candidate, validate=True)
+            # PIL header/load tekshiruvi: preview uchun haqiqatan o'qiladigan
+            # rasm ekanini oldindan tekshiramiz.
+            with Image.open(io.BytesIO(_raw)) as _im:
+                _im.verify()
+            preview_source = _candidate
+            preview_source_index = _idx
+            break
+        except Exception as _exc:
+            preview_errors.append(f"{_idx + 1}-rasm: {_exc}")
+
     p1, p2, p3 = st.columns(3)
     with p1:
         if st.button("👁️ Preview", use_container_width=True, type="primary"):
@@ -512,9 +678,27 @@ def main():
     if st.session_state.get("wm_show_preview"):
         if preview_source:
             try:
-                st.image(preview_bytes(base64.b64decode(preview_source), wm_settings), caption=f"👁️ Preview • {wm_text} • {wm_style_label} • {wm_opacity}%", use_container_width=True)
+                _preview = preview_bytes(base64.b64decode(preview_source), wm_settings)
+                st.image(
+                    _preview,
+                    caption=f"👁️ Preview • rasm {preview_source_index + 1} • {wm_text} • {wm_style_label} • {wm_opacity}%",
+                    use_container_width=True,
+                )
+                if preview_source_index and preview_errors:
+                    st.info(
+                        f"♻️ Birinchi {preview_source_index} ta rasm o'qilmadi; Preview avtomatik ravishda "
+                        f"{preview_source_index + 1}-rasmga o'tdi."
+                    )
             except Exception as e:
                 st.warning(f"Preview yaratilmadi: {e}")
+        elif preview_candidates:
+            st.warning(
+                "⚠️ Preview uchun rasmlar topildi, ammo ularning barchasi o'qilmadi. "
+                "Bitta buzilgan rasm sabab butun tizim to'xtamaydi, lekin bu partiyada o'qiladigan rasm qolmagan."
+            )
+            with st.expander("Texnik tafsilotlar"):
+                for _err in preview_errors:
+                    st.code(_err)
         else:
             st.info("Preview uchun kamida bitta rasm kerak.")
 

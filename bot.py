@@ -35,6 +35,7 @@ import asyncio
 import logging
 import zipfile
 import html
+import base64
 from datetime import datetime
 
 # MUHIM: bot.py Streamlit'ning fon-thread'i ichida ishga tushirilganda
@@ -60,7 +61,7 @@ from aiogram.enums import ParseMode
 import session_store
 from processor import process_single_image
 from docx_builder import build_docx
-from watermark import DEFAULT_SETTINGS, STYLE_LABELS, FONT_LABELS, normalize_settings, watermark_docx, preview_bytes
+from watermark import DEFAULT_SETTINGS, STYLE_LABELS, FONT_LABELS, normalize_settings, watermark_docx, preview_bytes, extract_docx_media_tolerant, extract_docx_media, extract_docx_media_tolerant
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -132,18 +133,30 @@ def watermark_settings_keyboard(chat_id):
     ])
 
 
+def docx_web_keyboard(session_id):
+    """Word fayli uchun rasm oqimidagi bilan bir xil Web "Tekshirish" tugmasi."""
+    if not WEBAPP_BASE_URL:
+        return None
+    url = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Tekshirish", url=url)]
+    ])
+
+
 def docx_keyboard(chat_id):
-    """Word fayli ostida rasm bilan bir xil Web sozlash tugmasi."""
-    pending = _pending_docx_info(chat_id)
-    if not pending:
-        return InlineKeyboardMarkup(inline_keyboard=[])
-    session_id = pending.get("session_id")
-    if session_id and WEBAPP_BASE_URL:
-        url = f"{WEBAPP_BASE_URL}/?session_id={session_id}"
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Tekshirish", url=url)]
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=[])
+    """Yuborilgan Word fayl ostidagi boshqaruv tugmalari."""
+    s = get_watermark_settings(chat_id)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔍 Tekshirish", callback_data="docx_check"),
+            InlineKeyboardButton(text="💧 Watermark", callback_data="docx_settings"),
+        ],
+        [
+            InlineKeyboardButton(text="👁️ Preview", callback_data="docx_preview"),
+            InlineKeyboardButton(text="❌ Bekor qilish", callback_data="docx_cancel"),
+        ],
+        [InlineKeyboardButton(text=f"💧 {s['opacity']}% • {STYLE_LABELS.get(s['style'], s['style'])} • {s['text'][:20]}", callback_data="docx_settings")],
+    ])
 
 
 def _pending_docx_info(chat_id):
@@ -151,47 +164,67 @@ def _pending_docx_info(chat_id):
 
 
 async def _send_docx_preview(message, chat_id):
-    """Word ichidagi birinchi rasmni watermark bilan preview qiladi."""
+    """Word ichidagi birinchi o'qiladigan/tiklanadigan rasmni preview qiladi.
+
+    CRC xatosi bo'lgan bitta rasm boshqa rasmlarni to'xtatmaydi. Masalan,
+    image14.jpeg buzilgan bo'lsa, image1-image13 yoki undan keyingi sog'lom
+    rasm preview uchun ishlatiladi.
+    """
     pending = _pending_docx_info(chat_id)
     if not pending:
         await message.answer("⚠️ Avval .docx fayl yuboring.")
         return
+
     settings = get_watermark_settings(chat_id)
     raw = pending["bytes"]
     try:
-        # Oddiy ZIP o'qish. CRC buzilgan media uchun avval tolerant qayta yig'ish
-        # ishlatiladi; shu sabab preview ham buzilgan DOCX sabab to'xtamaydi.
-        with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
-            media = [i for i in zf.infolist() if i.filename.lower().startswith("word/media/") and os.path.splitext(i.filename)[1].lower() in VALID_IMAGE_EXT]
-            if not media:
-                await message.answer("ℹ️ Word fayl ichida preview qilish uchun rasm topilmadi.")
-                return
+        media = extract_docx_media(raw)
+        if not media:
+            await message.answer("ℹ️ Word fayl ichida preview qilish uchun rasm topilmadi.")
+            return
+
+        repaired = sum(1 for x in media if x.get("repaired"))
+        failed = [x for x in media if not x.get("data")]
+        preview_data = None
+        preview_name = None
+
+        for item in media:
+            data = item.get("data")
+            if not data:
+                continue
             try:
-                data = zf.read(media[0])
-            except Exception:
-                # CRC xatosi bo'lsa watermark_docx tolerant oqish orqali yangi DOCX yaratadi.
-                import tempfile
-                in_path = f"/tmp/{chat_id}_preview_input.docx"
-                out_path = f"/tmp/{chat_id}_preview_fixed.docx"
-                with open(in_path, "wb") as f:
-                    f.write(raw)
-                watermark_docx(in_path, out_path, {**settings, "enabled": False})
-                with zipfile.ZipFile(out_path, "r") as fixed:
-                    names = [n for n in fixed.namelist() if n.lower().startswith("word/media/") and os.path.splitext(n)[1].lower() in VALID_IMAGE_EXT]
-                    if not names:
-                        raise RuntimeError("Rasm topilmadi")
-                    data = fixed.read(names[0])
-                for p in (in_path, out_path):
-                    try: os.remove(p)
-                    except Exception: pass
-            out = preview_bytes(data, settings)
-            from aiogram.types import BufferedInputFile
-            await message.answer_photo(BufferedInputFile(out, filename="watermark_preview.png"), caption=(
-                f"👁️ <b>Watermark Preview</b>\n"
-                f"📝 {html.escape(settings['text'])}\n"
-                f"🎨 {STYLE_LABELS.get(settings['style'], settings['style'])}\n"
-                f"👻 Shaffoflik: {settings['opacity']}%"
-            ))
+                preview_data = preview_bytes(data, settings)
+                preview_name = item["name"]
+                break
+            except Exception as exc:
+                item["error"] = str(exc)
+                continue
+
+        if preview_data is None:
+            await message.answer(
+                "❌ Preview uchun Word ichidagi rasmlarning hech birini o'qib bo'lmadi.\n"
+                f"🖼 Jami: {len(media)} ta\n"
+                f"⚠️ Tiklanmagan: {len(failed)} ta"
+            )
+            return
+
+        from aiogram.types import BufferedInputFile
+        note = [
+            "👁️ <b>Watermark Preview</b>",
+            f"🖼 Rasm: <code>{html.escape(preview_name or '')}</code>",
+            f"📝 {html.escape(settings['text'])}",
+            f"🎨 {STYLE_LABELS.get(settings['style'], settings['style'])}",
+            f"👻 Shaffoflik: {settings['opacity']}%",
+        ]
+        if repaired:
+            note.append(f"♻️ CRC tiklangan: {repaired} ta")
+        if failed:
+            note.append(f"⚠️ O'qilmagan rasm: {len(failed)} ta — boshqa rasmlar preview uchun ishlatildi")
+
+        await message.answer_photo(
+            BufferedInputFile(preview_data, filename="watermark_preview.png"),
+            caption="\n".join(note),
+        )
     except Exception as e:
         logger.exception("DOCX preview xatosi")
         await message.answer(f"❌ Preview qilishda xatolik: {html.escape(str(e))}")
@@ -489,43 +522,46 @@ async def handle_document(message: Message):
     file_bytes = buf.getvalue()
 
     if fname.endswith('.docx'):
-        # DOCX uchun ham rasm yuborilgandagi aynan bir xil UX:
-        # [🔍 Tekshirish] -> mavjud Web App -> watermark sozlamalari.
+        # Word ham rasm kabi aynan bitta "🔍 Tekshirish" Web tugmasi orqali
+        # mavjud Streamlit sahifasiga yuboriladi.  DOCX baytlari sessiyada
+        # saqlanadi, Web App esa CRC-tolerant media extractor orqali preview qiladi.
         session_id = session_store.new_session_id()
         session_store.create_session(
             session_id,
-            message.from_user.id,
-            chat_id,
-            default_filename=os.path.splitext(doc.file_name or "document.docx")[0],
+            telegram_user_id=message.from_user.id,
+            telegram_chat_id=chat_id,
+            default_filename=doc.file_name or "document.docx",
         )
-        import base64
         session_store.update_session(
             session_id,
-            status="docx_ready",
-            input_type="docx",
+            mode="docx",
             docx_b64=base64.b64encode(file_bytes).decode("ascii"),
-            docx_filename=doc.file_name or "document.docx",
             watermark_settings=get_watermark_settings(chat_id),
+            status="ready_for_review",
         )
-        _pending_docx[chat_id] = {
-            "bytes": file_bytes,
-            "file_id": doc.file_id,
-            "filename": doc.file_name or "document.docx",
-            "session_id": session_id,
-        }
         mirror_path = f"/tmp/{chat_id}_{doc.file_id}_pending.docx"
         try:
             with open(mirror_path, "wb") as f:
                 f.write(file_bytes)
-            kb = docx_keyboard(chat_id)
+            kb = docx_web_keyboard(session_id)
+            caption = (
+                "📄 <b>Word fayl qabul qilindi.</b>\n\n"
+                "Rasm yuborgandagi kabi quyidagi tugmani bosing. "
+                "Web sahifada watermark yozuvi, uslubi, shaffofligi va boshqa "
+                "parametrlarni sozlab, Preview qiling.\n\n"
+                "⚠️ Word ichidagi bitta rasm CRC xatosiga ega bo'lsa ham, "
+                "o'qiladigan boshqa rasmlar Preview'da ishlashda davom etadi."
+            )
             await message.answer_document(
                 FSInputFile(mirror_path, filename=doc.file_name or "document.docx"),
-                caption="📄 <b>Word fayl qabul qilindi.</b>\n\nPastdagi <b>🔍 Tekshirish</b> tugmasini bosing. U rasm yuborgandagi kabi mavjud Web sozlash sahifasini ochadi.",
+                caption=caption,
                 reply_markup=kb,
             )
         finally:
-            try: os.remove(mirror_path)
-            except Exception: pass
+            try:
+                os.remove(mirror_path)
+            except Exception:
+                pass
 
     elif fname.endswith('.zip'):
         session_id, data = _get_or_create_session(chat_id, message.from_user.id)
@@ -591,19 +627,12 @@ async def docx_preview(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "docx_check")
 async def docx_check(callback: CallbackQuery):
-    # Eski callback_data bilan yuborilgan xabarlar uchun moslik.
     chat_id = callback.message.chat.id
-    pending = _pending_docx_info(chat_id)
-    if pending and pending.get("session_id") and WEBAPP_BASE_URL:
-        await callback.answer("Web sozlamalar ochilmoqda...")
-        await callback.message.answer(
-            "🔍 Word fayl uchun sozlash sahifasi:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔍 Tekshirish", url=f"{WEBAPP_BASE_URL}/?session_id={pending['session_id']}")
-            ]]),
-        )
-    else:
-        await callback.answer("Web sahifa manzili sozlanmagan.", show_alert=True)
+    if not _pending_docx_info(chat_id):
+        await callback.answer("Word fayl topilmadi. Qaytadan yuboring.", show_alert=True)
+        return
+    await callback.answer("Tekshirish boshlandi...")
+    await _process_pending_docx(chat_id, callback.message)
 
 
 @dp.callback_query(F.data == "docx_cancel")

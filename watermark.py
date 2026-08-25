@@ -8,6 +8,7 @@ import io
 import os
 import zipfile
 import zlib
+import struct
 from copy import deepcopy
 from PIL import Image, ImageDraw, ImageFont
 
@@ -191,16 +192,153 @@ def watermark_image_bytes(image_bytes, settings=None):
 
 
 def _read_zip_entry_tolerant(zf, info):
+    """Read a ZIP entry even when its stored CRC is wrong.
+
+    zipfile.ZipFile.read() validates CRC and raises BadZipFile.  For DOCX
+    media this is unnecessarily fatal: if the compressed bytes themselves
+    are intact, the image can still be decompressed perfectly.  This fallback
+    reads the local file header directly, skips the CRC check, decompresses
+    the raw bytes, and then validates the resulting payload separately.
+    """
     try:
         return zf.read(info), False
     except (zipfile.BadZipFile, RuntimeError, EOFError) as first_error:
-        tolerant_info = deepcopy(info)
-        tolerant_info.CRC = None
-        try:
-            with zf.open(tolerant_info, "r") as fp:
-                return fp.read(), True
-        except Exception:
+        pass
+
+    # Directly parse the local-file header.  This deliberately avoids
+    # ZipExtFile's CRC check.  It supports the compression methods used by
+    # normal DOCX archives: STORE (0) and DEFLATE (8).
+    try:
+        fp = zf.fp
+        if fp is None:
             raise first_error
+        fp.seek(info.header_offset)
+        header = fp.read(30)
+        if len(header) != 30 or header[:4] != b"PK\x03\x04":
+            raise first_error
+        _, _, flag_bits, compress_type, _, _, _, comp_size, uncomp_size, name_len, extra_len = struct.unpack(
+            "<4s5H3I2H", header
+        )
+        if flag_bits & 0x08 and (comp_size == 0 or uncomp_size == 0):
+            # Data-descriptor archives may not expose sizes in the local
+            # header.  info has the authoritative values in the central dir.
+            comp_size = info.compress_size
+            uncomp_size = info.file_size
+        fp.seek(name_len + extra_len, 1)
+        raw = fp.read(comp_size)
+        if len(raw) != comp_size:
+            raise first_error
+
+        if compress_type == zipfile.ZIP_STORED:
+            data = raw
+        elif compress_type == zipfile.ZIP_DEFLATED:
+            data = zlib.decompress(raw, -15)
+        else:
+            # Let Python's normal ZIP reader handle other methods if possible.
+            tolerant_info = deepcopy(info)
+            tolerant_info.CRC = None
+            with zf.open(tolerant_info, "r") as ext:
+                data = ext.read()
+
+        # We intentionally do NOT reject a CRC mismatch here.  Report it to
+        # callers through the second return value.
+        crc_bad = (zlib.crc32(data) & 0xffffffff) != (info.CRC & 0xffffffff)
+        if uncomp_size and len(data) != uncomp_size:
+            raise first_error
+        return data, crc_bad
+    except Exception:
+        raise first_error
+
+
+def extract_docx_media(input_source, supported_extensions=None):
+    """DOCX ichidan rasmlarni CRC xatosiga chidamli tarzda o'qiydi.
+
+    input_source: fayl yo'li, bytes yoki file-like object.
+    Natija: [{'name': ..., 'data': ..., 'repaired': bool, 'error': str|None}, ...]
+
+    Muhim: bitta media fayl (masalan image14.jpeg) CRC xatosi bersa,
+    qolgan rasmlar o'qilishda davom etadi. CRC noto'g'ri bo'lsa, ZIP
+    ma'lumot oqimi baribir o'qiladi va faqat markaziy katalogdagi CRC
+    tekshiruvi chetlab o'tiladi.
+    """
+    exts = {e.lower() for e in (supported_extensions or SUPPORTED_EXTENSIONS)}
+    source = input_source
+    close_source = False
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
+        close_source = True
+    try:
+        with zipfile.ZipFile(source, "r") as zf:
+            results = []
+            for info in zf.infolist():
+                lower = info.filename.lower()
+                ext = os.path.splitext(lower)[1]
+                if not lower.startswith("word/media/") or ext not in exts:
+                    continue
+                try:
+                    data = zf.read(info)
+                    results.append({"name": info.filename, "data": data, "repaired": False, "error": None})
+                    continue
+                except (zipfile.BadZipFile, RuntimeError, EOFError, zlib.error) as normal_error:
+                    # Faqat shu entry uchun CRC tekshiruvini o'chiramiz.
+                    try:
+                        tolerant_info = deepcopy(info)
+                        tolerant_info.CRC = None
+                        with zf.open(tolerant_info, "r") as fp:
+                            data = fp.read()
+                        # ZIP oqimi o'qilganini alohida tekshiramiz; CRC noto'g'ri
+                        # bo'lsa bu qiymat markaziy katalogdagi xato CRC ekanini
+                        # ko'rsatadi. Haqiqiy fayl ma'lumoti bo'lsa preview davom etadi.
+                        actual_crc = zlib.crc32(data) & 0xffffffff
+                        results.append({
+                            "name": info.filename,
+                            "data": data,
+                            "repaired": info.CRC != actual_crc,
+                            "error": None,
+                        })
+                    except Exception as tolerant_error:
+                        results.append({
+                            "name": info.filename,
+                            "data": None,
+                            "repaired": False,
+                            "error": str(tolerant_error) or str(normal_error),
+                        })
+            return results
+    finally:
+        if close_source:
+            source.close()
+
+
+def first_valid_docx_preview(input_source, settings=None, max_size=(1000, 700)):
+    """DOCX ichidagi birinchi sog'lom/tiklanadigan rasmga preview yaratadi.
+
+    Bitta buzilgan rasm butun preview'ni to'xtatmaydi. Qaysi rasm tanlangani
+    va nechta rasm tiklanganini metadata sifatida qaytaradi.
+    """
+    media = extract_docx_media(input_source)
+    repaired = sum(1 for x in media if x.get("repaired"))
+    errors = [x for x in media if x.get("data") is None]
+    for item in media:
+        if not item.get("data"):
+            continue
+        try:
+            return preview_bytes(item["data"], settings, max_size=max_size), {
+                "name": item["name"],
+                "total": len(media),
+                "repaired": repaired,
+                "failed": len(errors),
+                "errors": errors,
+            }
+        except Exception as exc:
+            item["error"] = str(exc)
+            continue
+    return None, {
+        "name": None,
+        "total": len(media),
+        "repaired": repaired,
+        "failed": len(errors),
+        "errors": errors,
+    }
 
 
 def watermark_docx(input_path, output_path, settings=None):
@@ -208,32 +346,93 @@ def watermark_docx(input_path, output_path, settings=None):
     if not s["enabled"]:
         with open(input_path, "rb") as src, open(output_path, "wb") as dst:
             dst.write(src.read())
+        watermark_docx.last_report = {"changed": 0, "repaired": 0, "failed_media": []}
         return output_path, 0
-    changed = repaired = 0
+
+    changed = 0
+    repaired = 0
     failed_media = []
+
+    # Muhim: ZIP yozish vaqtida har bir entryni alohida o'qiymiz. Bitta
+    # image14.jpeg CRC xatosi boshqa rasmlarni to'xtatmaydi.
     with zipfile.ZipFile(input_path, "r") as zin, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            lower = item.filename.lower(); ext = os.path.splitext(lower)[1]
+            lower = item.filename.lower()
+            ext = os.path.splitext(lower)[1]
             try:
                 data, tolerant = _read_zip_entry_tolerant(zin, item)
             except Exception:
                 if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
-                    failed_media.append(item.filename); continue
+                    failed_media.append(item.filename)
+                    # Rasmni tashlab yubormasdan, imkon qolsachi original
+                    # entryni yozishga urinamiz. CRC buzilgan entryni zipfile
+                    # bilan qayta o'qib bo'lmasa, uni saqlab qolishning iloji
+                    # yo'q; qolgan DOCX strukturasi esa saqlanadi.
+                    continue
                 raise
-            if tolerant and item.CRC is not None and (zlib.crc32(data)&0xffffffff) != item.CRC:
+
+            if tolerant:
                 repaired += 1
+
             if lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS:
                 try:
-                    data = watermark_image_bytes(data, s); changed += 1
+                    data = watermark_image_bytes(data, s)
+                    changed += 1
                 except Exception:
+                    # Rasm o'qilmasa, imkon qadar original bytesni saqlaymiz.
+                    # Bu bitta rasm sabab butun Word'ni yiqitmaslik uchun.
                     pass
-            zout.writestr(item, data)
+
+            # Agar tolerant o'qilgan entry bo'lsa, eski (noto'g'ri) CRC ni
+            # qayta yozmaslik kerak. ZIP yozuvchisi yangi CRC ni o'zi hisoblaydi.
+            write_info = deepcopy(item)
+            if tolerant:
+                write_info.CRC = None
+                write_info.file_size = len(data)
+                write_info.compress_size = 0
+            zout.writestr(write_info, data)
+
+    watermark_docx.last_report = {
+        "changed": changed,
+        "repaired": repaired,
+        "failed_media": failed_media,
+    }
     return output_path, changed
 
 
 def preview_bytes(image_bytes, settings=None, max_size=(1000, 700)):
+    """Create a preview from raw image bytes.
+
+    This function is intentionally independent of ZIP/CRC handling.  DOCX
+    callers should first extract the media with read_zip_media_tolerant().
+    """
     img = Image.open(io.BytesIO(image_bytes)); img.load()
     wm = apply_watermark(img, settings)
     wm.thumbnail(max_size, Image.Resampling.LANCZOS)
     out = io.BytesIO(); wm.save(out, format="PNG")
     return out.getvalue()
+
+
+def extract_docx_media_tolerant(docx_bytes):
+    """Return all readable DOCX images, including images with bad CRC metadata.
+
+    Returns a list of dicts: {name, data, crc_bad}.  One broken media entry
+    never prevents the remaining images from being returned.
+    """
+    result = []
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        for info in zf.infolist():
+            lower = info.filename.lower()
+            ext = os.path.splitext(lower)[1]
+            if not lower.startswith("word/media/") or ext not in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                data, crc_bad = _read_zip_entry_tolerant(zf, info)
+                # PIL validation: if the bytes are really damaged, skip only
+                # that image instead of killing the entire preview.
+                img = Image.open(io.BytesIO(data))
+                img.verify()
+                result.append({"name": info.filename, "data": data, "crc_bad": bool(crc_bad)})
+            except Exception as exc:
+                result.append({"name": info.filename, "data": None, "crc_bad": True, "error": str(exc)})
+    return result
