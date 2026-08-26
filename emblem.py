@@ -71,6 +71,54 @@ def _pil_to_bgr(source):
     return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
+def _local_tile_mask(rgb: np.ndarray) -> np.ndarray:
+    """Foreground mask built per local tile instead of one global background.
+
+    A single emblem sample can legitimately contain more than one background
+    context — e.g. a blue square block (icon drawn in white) sitting next to
+    a separate white-background pictogram block (icon drawn in black). A
+    single global threshold (whiteish-is-background OR blackish-is-background)
+    can only get one of those two blocks right; the other block's icon gets
+    silently merged into "background" and disappears from the mask.
+
+    We instead split the image into a coarse grid of tiles, estimate a local
+    background color per tile from that tile's own border/corner pixels, and
+    flag pixels that deviate from *that* local background. This lets a black
+    icon on white register as foreground in one tile while a white icon on
+    blue registers as foreground in a neighboring tile. Tile-edge seams
+    (where a hard block boundary crosses a tile) are cleaned up with a light
+    closing pass since the tile grid can leave a thin false-foreground stripe
+    exactly on tile borders.
+    """
+    h, w = rgb.shape[:2]
+    tile = max(24, min(h, w) // 4)
+    out = np.zeros((h, w), np.uint8)
+    for y0 in range(0, h, tile):
+        for x0 in range(0, w, tile):
+            y1 = min(h, y0 + tile)
+            x1 = min(w, x0 + tile)
+            block = rgb[y0:y1, x0:x1]
+            bh, bw = block.shape[:2]
+            if bh < 4 or bw < 4:
+                continue
+            edge_n = max(1, min(4, min(bh, bw) // 6))
+            border = np.concatenate([
+                block[:edge_n].reshape(-1, 3), block[-edge_n:].reshape(-1, 3),
+                block[:, :edge_n].reshape(-1, 3), block[:, -edge_n:].reshape(-1, 3)
+            ], axis=0)
+            local_bg = np.median(border, axis=0).astype(np.float32)
+            dist = np.linalg.norm(block.astype(np.float32) - local_bg, axis=2)
+            thresh = max(16.0, float(np.percentile(dist, 80)) * 0.5)
+            out[y0:y1, x0:x1] = (dist > thresh).astype(np.uint8) * 255
+    # A tile whose border pixels straddle two different real colors (i.e. the
+    # tile grid happened to bisect a hard edge in the artwork) can flag its
+    # entire interior as foreground. Trim isolated tile-sized rectangles that
+    # are almost entirely foreground with no interior structure - those are
+    # seam artifacts, not logo content.
+    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return out
+
+
 def _rgb_mask_candidates(im: Image.Image) -> list[np.ndarray]:
     """Return several foreground masks; the best mask is selected later.
 
@@ -140,13 +188,137 @@ def _score_mask(mask: np.ndarray) -> float:
     return score
 
 
-def _choose_mask(im: Image.Image) -> np.ndarray:
+def _combine_best_masks(im: Image.Image, top_n: int = 2) -> np.ndarray:
+    """Union the top-scoring masks instead of taking a single winner.
+
+    Different candidate masks in ``_rgb_mask_candidates`` are each tuned for
+    a different background assumption (white bg, black bg, tiled/local bg,
+    etc). A sample with mixed backgrounds (e.g. a white-bg icon block next to
+    a black-bg pictogram block) will have its two halves best represented by
+    *different* candidates. Picking only the single highest-scoring mask
+    discards whichever half that mask handles poorly. Taking the union of the
+    best few candidates keeps both halves without regressing simple,
+    single-background samples (their top masks are near-duplicates, so the
+    union is unchanged).
+
+    The tile-based local-background mask is always folded in (not just when
+    it scores well): ``_score_mask`` rewards compact, low-area-ratio shapes,
+    which structurally penalizes the tile mask on multi-block samples even
+    when it is the only candidate that correctly recovers a whole block (e.g.
+    a dark icon on a white sub-panel next to a light icon on a colored
+    sub-panel). It is exactly the fallback the other candidates need for that
+    case, so it must not be gated behind the same scoring function it is
+    meant to compensate for.
+    """
+    rgba = np.asarray(im.convert("RGBA"))
+    rgb = rgba[:, :, :3]
     candidates = _rgb_mask_candidates(im)
-    best = max(candidates, key=_score_mask)
-    m = best.copy()
+    ranked = sorted(candidates, key=_score_mask, reverse=True)
+    combined = ranked[0].copy()
+    for extra in ranked[1:top_n]:
+        # Only fold in a second mask's extra foreground if it plausibly adds
+        # a distinct shape rather than just generic noise: require the
+        # candidate to itself score reasonably (not the -1e9 "empty" floor).
+        if _score_mask(extra) > 0:
+            combined = cv2.bitwise_or(combined, extra)
+    tile_mask = _local_tile_mask(rgb)
+    combined = cv2.bitwise_or(combined, tile_mask)
+    return combined
+
+
+def _drop_watermark_speckle(mask: np.ndarray) -> np.ndarray:
+    """Remove faint, isolated blobs (diagonal watermark text/logos) from a
+    foreground mask while keeping the real emblem intact.
+
+    A cropped sample frequently has a semi-transparent watermark ("© ... Bot")
+    crossing the white/blank area around the real logo. That watermark is
+    high-contrast enough to survive the color/HSV thresholds in
+    ``_rgb_mask_candidates`` but is structurally very different from the
+    emblem: it is made of many small, thin, widely scattered components
+    (individual letters/glyphs) instead of one or two large solid shapes.
+
+    We keep every connected component whose area is at least 12% of the
+    single largest component's area (the largest component is virtually
+    always part of the real emblem), which discards small scattered
+    watermark glyphs without touching legitimate multi-part logos (e.g. an
+    emblem drawn next to a separate pictogram box).
+    """
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return mask
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    if areas.size == 0:
+        return mask
+    largest = float(areas.max())
+    if largest <= 0:
+        return mask
+    keep = np.zeros_like(mask)
+    for i, area in enumerate(areas, start=1):
+        if area >= max(6.0, largest * 0.12):
+            keep[labels == i] = 255
+    return keep if int(keep.sum()) > 0 else mask
+
+
+def _fill_block_holes(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """Recover an icon that was swallowed by its own block's background.
+
+    After the global foreground mask is computed, take each large connected
+    component's bounding rectangle (a "block", e.g. a solid-color square or
+    a framed pictogram) and re-threshold *only that rectangle* against its
+    own local background. This recovers icons whose fill color happens to
+    match the assumption a global mask made (e.g. a black car icon on a
+    white sub-panel, when the global mask treated black as background
+    because most of the rest of the sample is black-on-white text/lines).
+    Small/thin components are left untouched — this only revisits blocks
+    large enough to plausibly contain their own icon.
+    """
+    h, w = mask.shape[:2]
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    out = mask.copy()
+    for lbl in range(1, n):
+        x, y, bw, bh, area = stats[lbl]
+        if bw < 18 or bh < 18 or area < 150:
+            continue
+        pad = max(1, int(round(min(bw, bh) * 0.06)))
+        x0 = max(0, x - pad); y0 = max(0, y - pad)
+        x1 = min(w, x + bw + pad); y1 = min(h, y + bh + pad)
+        block = rgb[y0:y1, x0:x1]
+        bbh, bbw = block.shape[:2]
+        if bbh < 6 or bbw < 6:
+            continue
+        edge_n = max(1, min(4, min(bbh, bbw) // 6))
+        border = np.concatenate([
+            block[:edge_n].reshape(-1, 3), block[-edge_n:].reshape(-1, 3),
+            block[:, :edge_n].reshape(-1, 3), block[:, -edge_n:].reshape(-1, 3)
+        ], axis=0)
+        local_bg = np.median(border, axis=0).astype(np.float32)
+        dist = np.linalg.norm(block.astype(np.float32) - local_bg, axis=2)
+        thresh = max(16.0, float(np.percentile(dist, 80)) * 0.5)
+        local_fg = (dist > thresh).astype(np.uint8) * 255
+        # Only ever add pixels back (never remove foreground the global mask
+        # already found) so this cannot regress a sample the global mask
+        # already handled correctly.
+        out[y0:y1, x0:x1] = cv2.bitwise_or(out[y0:y1, x0:x1], local_fg)
+    return out
+
+
+def _choose_mask(im: Image.Image) -> np.ndarray:
+    rgba = np.asarray(im.convert("RGBA"))
+    rgb = rgba[:, :, :3]
+    candidates = _rgb_mask_candidates(im)
+    m = max(candidates, key=_score_mask).copy()
     # Preserve tiny connected components: only a very small open kernel.
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    m = _drop_watermark_speckle(m)
+    # Re-check each recovered block's own interior for an icon the global
+    # mask missed (e.g. a same-color-as-assumed-background icon). This must
+    # run after the speckle filter (so it only sees real blocks, not
+    # watermark noise) and must NOT be followed by another speckle pass:
+    # a small icon recovered this way (e.g. a car pictogram) can itself be
+    # smaller than the 12% largest-component threshold and would otherwise
+    # be discarded right after being recovered.
+    m = _fill_block_holes(m, rgb)
     return m
 
 
@@ -514,7 +686,19 @@ def _fit_overlay(im, target_w, target_h, scale_percent=8, stretch=False, opacity
     tw=max(4,int(round(target_w*factor))); th=max(4,int(round(target_h*factor)))
     out=im.copy()
     if stretch:
-        out=out.resize((tw,th),Image.Resampling.LANCZOS)
+        # Guard against a detected box whose aspect ratio doesn't match the
+        # new emblem (e.g. the old sample's bounding box was distorted by
+        # watermark contamination). Stretching a square logo into a tall/
+        # narrow box makes it visibly warped ("elongated"). If the box ratio
+        # differs from the new emblem's own ratio by more than ~22%, fall
+        # back to a proportional fit instead of a hard stretch.
+        src_ratio = im.width / max(1, im.height)
+        box_ratio = tw / max(1, th)
+        ratio_off = abs(box_ratio - src_ratio) / max(src_ratio, box_ratio)
+        if ratio_off > 0.22:
+            out.thumbnail((tw, th), Image.Resampling.LANCZOS)
+        else:
+            out = out.resize((tw, th), Image.Resampling.LANCZOS)
     else:
         out.thumbnail((tw,th),Image.Resampling.LANCZOS)
     if opacity < 100:
@@ -539,20 +723,29 @@ def _clean_old(src_rgba, template_bytes, det, padding_percent=4):
 
     This avoids the V9 behaviour where a large rectangular inpaint could erase
     nearby question text. A small dilation is added for anti-aliased edges.
+
+    Detection boxes from the feature-match (SIFT/ORB) path are homography-
+    derived and can be a few pixels tighter than the emblem's real extent,
+    especially with a low inlier count. A too-small cleanup padding then
+    leaves a visible sliver of the old logo behind. We therefore use a more
+    generous minimum padding, and always dilate enough to cover typical
+    anti-aliasing/compression halos around the old artwork.
     """
     rgb=np.asarray(src_rgba.convert("RGB")).copy()
     mask=_template_foreground_mask(template_bytes,det)
     if mask is None:
         mask=np.ones((det.h,det.w),np.uint8)*255
-    pad=max(0,int(round(max(det.w,det.h)*padding_percent/100.0)))
-    if pad:
-        k=max(3,2*min(8,pad)+1)
-        mask=cv2.dilate(mask,np.ones((k,k),np.uint8),iterations=1)
+    # Enforce a sane minimum padding regardless of the caller's setting, so a
+    # low-confidence/tight bbox still fully covers the old artwork.
+    effective_padding = max(float(padding_percent), 6.0)
+    pad=max(2,int(round(max(det.w,det.h)*effective_padding/100.0)))
+    k=max(5,2*min(14,pad)+1)
+    mask=cv2.dilate(mask,np.ones((k,k),np.uint8),iterations=1)
     full=np.zeros(rgb.shape[:2],np.uint8)
     x1=max(0,det.x); y1=max(0,det.y); x2=min(rgb.shape[1],det.x+det.w); y2=min(rgb.shape[0],det.y+det.h)
     crop=mask[:y2-y1,:x2-x1]
     full[y1:y2,x1:x2]=crop
-    radius=max(1,min(8,int(round(max(det.w,det.h)*0.045))))
+    radius=max(2,min(12,int(round(max(det.w,det.h)*0.06))))
     cleaned=cv2.inpaint(rgb,full,radius,cv2.INPAINT_TELEA)
     return Image.fromarray(cleaned).convert("RGBA")
 
