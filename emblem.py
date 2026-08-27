@@ -71,54 +71,6 @@ def _pil_to_bgr(source):
     return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
-def _local_tile_mask(rgb: np.ndarray) -> np.ndarray:
-    """Foreground mask built per local tile instead of one global background.
-
-    A single emblem sample can legitimately contain more than one background
-    context — e.g. a blue square block (icon drawn in white) sitting next to
-    a separate white-background pictogram block (icon drawn in black). A
-    single global threshold (whiteish-is-background OR blackish-is-background)
-    can only get one of those two blocks right; the other block's icon gets
-    silently merged into "background" and disappears from the mask.
-
-    We instead split the image into a coarse grid of tiles, estimate a local
-    background color per tile from that tile's own border/corner pixels, and
-    flag pixels that deviate from *that* local background. This lets a black
-    icon on white register as foreground in one tile while a white icon on
-    blue registers as foreground in a neighboring tile. Tile-edge seams
-    (where a hard block boundary crosses a tile) are cleaned up with a light
-    closing pass since the tile grid can leave a thin false-foreground stripe
-    exactly on tile borders.
-    """
-    h, w = rgb.shape[:2]
-    tile = max(24, min(h, w) // 4)
-    out = np.zeros((h, w), np.uint8)
-    for y0 in range(0, h, tile):
-        for x0 in range(0, w, tile):
-            y1 = min(h, y0 + tile)
-            x1 = min(w, x0 + tile)
-            block = rgb[y0:y1, x0:x1]
-            bh, bw = block.shape[:2]
-            if bh < 4 or bw < 4:
-                continue
-            edge_n = max(1, min(4, min(bh, bw) // 6))
-            border = np.concatenate([
-                block[:edge_n].reshape(-1, 3), block[-edge_n:].reshape(-1, 3),
-                block[:, :edge_n].reshape(-1, 3), block[:, -edge_n:].reshape(-1, 3)
-            ], axis=0)
-            local_bg = np.median(border, axis=0).astype(np.float32)
-            dist = np.linalg.norm(block.astype(np.float32) - local_bg, axis=2)
-            thresh = max(16.0, float(np.percentile(dist, 80)) * 0.5)
-            out[y0:y1, x0:x1] = (dist > thresh).astype(np.uint8) * 255
-    # A tile whose border pixels straddle two different real colors (i.e. the
-    # tile grid happened to bisect a hard edge in the artwork) can flag its
-    # entire interior as foreground. Trim isolated tile-sized rectangles that
-    # are almost entirely foreground with no interior structure - those are
-    # seam artifacts, not logo content.
-    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    return out
-
-
 def _rgb_mask_candidates(im: Image.Image) -> list[np.ndarray]:
     """Return several foreground masks; the best mask is selected later.
 
@@ -188,137 +140,13 @@ def _score_mask(mask: np.ndarray) -> float:
     return score
 
 
-def _combine_best_masks(im: Image.Image, top_n: int = 2) -> np.ndarray:
-    """Union the top-scoring masks instead of taking a single winner.
-
-    Different candidate masks in ``_rgb_mask_candidates`` are each tuned for
-    a different background assumption (white bg, black bg, tiled/local bg,
-    etc). A sample with mixed backgrounds (e.g. a white-bg icon block next to
-    a black-bg pictogram block) will have its two halves best represented by
-    *different* candidates. Picking only the single highest-scoring mask
-    discards whichever half that mask handles poorly. Taking the union of the
-    best few candidates keeps both halves without regressing simple,
-    single-background samples (their top masks are near-duplicates, so the
-    union is unchanged).
-
-    The tile-based local-background mask is always folded in (not just when
-    it scores well): ``_score_mask`` rewards compact, low-area-ratio shapes,
-    which structurally penalizes the tile mask on multi-block samples even
-    when it is the only candidate that correctly recovers a whole block (e.g.
-    a dark icon on a white sub-panel next to a light icon on a colored
-    sub-panel). It is exactly the fallback the other candidates need for that
-    case, so it must not be gated behind the same scoring function it is
-    meant to compensate for.
-    """
-    rgba = np.asarray(im.convert("RGBA"))
-    rgb = rgba[:, :, :3]
-    candidates = _rgb_mask_candidates(im)
-    ranked = sorted(candidates, key=_score_mask, reverse=True)
-    combined = ranked[0].copy()
-    for extra in ranked[1:top_n]:
-        # Only fold in a second mask's extra foreground if it plausibly adds
-        # a distinct shape rather than just generic noise: require the
-        # candidate to itself score reasonably (not the -1e9 "empty" floor).
-        if _score_mask(extra) > 0:
-            combined = cv2.bitwise_or(combined, extra)
-    tile_mask = _local_tile_mask(rgb)
-    combined = cv2.bitwise_or(combined, tile_mask)
-    return combined
-
-
-def _drop_watermark_speckle(mask: np.ndarray) -> np.ndarray:
-    """Remove faint, isolated blobs (diagonal watermark text/logos) from a
-    foreground mask while keeping the real emblem intact.
-
-    A cropped sample frequently has a semi-transparent watermark ("© ... Bot")
-    crossing the white/blank area around the real logo. That watermark is
-    high-contrast enough to survive the color/HSV thresholds in
-    ``_rgb_mask_candidates`` but is structurally very different from the
-    emblem: it is made of many small, thin, widely scattered components
-    (individual letters/glyphs) instead of one or two large solid shapes.
-
-    We keep every connected component whose area is at least 12% of the
-    single largest component's area (the largest component is virtually
-    always part of the real emblem), which discards small scattered
-    watermark glyphs without touching legitimate multi-part logos (e.g. an
-    emblem drawn next to a separate pictogram box).
-    """
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if n <= 1:
-        return mask
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    if areas.size == 0:
-        return mask
-    largest = float(areas.max())
-    if largest <= 0:
-        return mask
-    keep = np.zeros_like(mask)
-    for i, area in enumerate(areas, start=1):
-        if area >= max(6.0, largest * 0.12):
-            keep[labels == i] = 255
-    return keep if int(keep.sum()) > 0 else mask
-
-
-def _fill_block_holes(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
-    """Recover an icon that was swallowed by its own block's background.
-
-    After the global foreground mask is computed, take each large connected
-    component's bounding rectangle (a "block", e.g. a solid-color square or
-    a framed pictogram) and re-threshold *only that rectangle* against its
-    own local background. This recovers icons whose fill color happens to
-    match the assumption a global mask made (e.g. a black car icon on a
-    white sub-panel, when the global mask treated black as background
-    because most of the rest of the sample is black-on-white text/lines).
-    Small/thin components are left untouched — this only revisits blocks
-    large enough to plausibly contain their own icon.
-    """
-    h, w = mask.shape[:2]
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    out = mask.copy()
-    for lbl in range(1, n):
-        x, y, bw, bh, area = stats[lbl]
-        if bw < 18 or bh < 18 or area < 150:
-            continue
-        pad = max(1, int(round(min(bw, bh) * 0.06)))
-        x0 = max(0, x - pad); y0 = max(0, y - pad)
-        x1 = min(w, x + bw + pad); y1 = min(h, y + bh + pad)
-        block = rgb[y0:y1, x0:x1]
-        bbh, bbw = block.shape[:2]
-        if bbh < 6 or bbw < 6:
-            continue
-        edge_n = max(1, min(4, min(bbh, bbw) // 6))
-        border = np.concatenate([
-            block[:edge_n].reshape(-1, 3), block[-edge_n:].reshape(-1, 3),
-            block[:, :edge_n].reshape(-1, 3), block[:, -edge_n:].reshape(-1, 3)
-        ], axis=0)
-        local_bg = np.median(border, axis=0).astype(np.float32)
-        dist = np.linalg.norm(block.astype(np.float32) - local_bg, axis=2)
-        thresh = max(16.0, float(np.percentile(dist, 80)) * 0.5)
-        local_fg = (dist > thresh).astype(np.uint8) * 255
-        # Only ever add pixels back (never remove foreground the global mask
-        # already found) so this cannot regress a sample the global mask
-        # already handled correctly.
-        out[y0:y1, x0:x1] = cv2.bitwise_or(out[y0:y1, x0:x1], local_fg)
-    return out
-
-
 def _choose_mask(im: Image.Image) -> np.ndarray:
-    rgba = np.asarray(im.convert("RGBA"))
-    rgb = rgba[:, :, :3]
     candidates = _rgb_mask_candidates(im)
-    m = max(candidates, key=_score_mask).copy()
+    best = max(candidates, key=_score_mask)
+    m = best.copy()
     # Preserve tiny connected components: only a very small open kernel.
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    m = _drop_watermark_speckle(m)
-    # Re-check each recovered block's own interior for an icon the global
-    # mask missed (e.g. a same-color-as-assumed-background icon). This must
-    # run after the speckle filter (so it only sees real blocks, not
-    # watermark noise) and must NOT be followed by another speckle pass:
-    # a small icon recovered this way (e.g. a car pictogram) can itself be
-    # smaller than the 12% largest-component threshold and would otherwise
-    # be discarded right after being recovered.
-    m = _fill_block_holes(m, rgb)
     return m
 
 
@@ -373,13 +201,20 @@ def _resize_target(target, max_side=1900):
 
 
 def _dense_scales(fast=True):
+    # The low-scale band is intentionally dense because a 400–500 px source
+    # emblem may become only 18–35 px inside a Word screenshot.  Keep the fast
+    # path compact enough for multiple images; the deep path fills the gaps.
     if fast:
-        vals = list(np.geomspace(0.10, 3.0, 14))
-        vals += [0.125, 0.1667, 0.20, 0.25, 0.3333, 0.5, 0.6667, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5]
+        vals = [0.025, 0.028, 0.032, 0.036, 0.040, 0.045, 0.050, 0.060,
+                0.075, 0.090, 0.12, 0.18, 0.30, 0.50, 0.80, 1.0, 1.25, 1.6, 2.0, 2.5]
     else:
-        vals = list(np.geomspace(0.06, 4.5, 24))
-        vals += [0.075, 0.10, 0.125, 0.1667, 0.20, 0.25, 0.3333, 0.5, 0.6667, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
+        vals = list(np.geomspace(0.018, 4.5, 30))
+        vals += [0.02, 0.025, 0.028, 0.032, 0.036, 0.040, 0.045, 0.050,
+                 0.060, 0.075, 0.09, 0.10, 0.12, 0.15, 0.18, 0.22, 0.30,
+                 0.40, 0.50, 0.6667, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0,
+                 2.5, 3.0, 4.0]
     return sorted(set(round(float(v), 4) for v in vals))
+
 
 def _corr(a, b):
     if a.shape != b.shape or a.size < 4:
@@ -434,6 +269,44 @@ def _hsv_similarity(a, b, mask):
     return max(0.0, min(1.0, 1.0 - d))
 
 
+def _saturation_similarity(a, b, mask):
+    """Compare chroma structure rather than absolute RGB values.
+
+    This is especially useful when the old sample has a black/white matte
+    around it but the real target sits on a white page, and when a watermark
+    is laid over the target.
+    """
+    if a.shape != b.shape:
+        return 0.0
+    sa = cv2.cvtColor(a, cv2.COLOR_BGR2HSV)[:, :, 1].astype(np.float32)
+    sb = cv2.cvtColor(b, cv2.COLOR_BGR2HSV)[:, :, 1].astype(np.float32)
+    m = mask > 15
+    if int(m.sum()) < 8:
+        return 0.0
+    # Correlation is stable under JPEG/brightness changes.
+    return max(0.0, _corr(sa[m], sb[m]))
+
+
+def _shape_similarity(template_mask, patch_bgr):
+    """Approximate foreground silhouette similarity, independent of page color."""
+    if template_mask is None or template_mask.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    # Colored/dark pixels are the most reliable foreground on white Word pages.
+    pm = (((sat > 32) | (val < 215))).astype(np.uint8) * 255
+    pm = cv2.morphologyEx(pm, cv2.MORPH_CLOSE, np.ones((2,2), np.uint8))
+    tm = cv2.resize(template_mask, (patch_bgr.shape[1], patch_bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST) > 35
+    pm_bool = pm > 0
+    union = int(np.count_nonzero(tm | pm_bool))
+    if union < 8:
+        return 0.0
+    inter = int(np.count_nonzero(tm & pm_bool))
+    return float(inter / union)
+
+
 def _candidate_points(res, top_k=5, min_distance=12):
     """Return several maxima, not just the single global maximum."""
     work = res.copy()
@@ -465,20 +338,26 @@ def _evaluate_candidate(tpl, target, x, y, w, h, locator_score, method, target_s
     mae_sim = _masked_mae_similarity(patch, rt, rm)
     grad_sim = _gradient_similarity(pg, rg)
     hsv_sim = _hsv_similarity(patch, rt, rm)
+    sat_sim = _saturation_similarity(patch, rt, rm)
+    shape_sim = _shape_similarity(rm, patch)
 
-    # White/black backgrounds can make pixel similarity misleading; geometry
-    # and masked correlation therefore carry the largest weights.
+    # Pixel similarity is intentionally not dominant: the sample can have a
+    # black/white matte that does not exist in the Word image.  Chroma + shape
+    # are strong signals for tiny blue/red emblems on white pages.
     score = (
-        0.31 * max(0.0, edge_corr) +
-        0.25 * max(0.0, gray_corr) +
-        0.16 * mae_sim +
-        0.12 * grad_sim +
+        0.27 * max(0.0, edge_corr) +
+        0.20 * max(0.0, gray_corr) +
+        0.10 * mae_sim +
+        0.10 * grad_sim +
         0.10 * hsv_sim +
-        0.06 * max(0.0, min(1.0, locator_score))
+        0.11 * sat_sim +
+        0.07 * shape_sim +
+        0.05 * max(0.0, min(1.0, locator_score))
     )
     return {
         "score": float(score), "edge": float(edge_corr), "gray": float(gray_corr),
         "mae": float(mae_sim), "gradient": float(grad_sim), "hsv": float(hsv_sim),
+        "saturation": float(sat_sim), "shape": float(shape_sim),
         "locator": float(locator_score), "x": int(x), "y": int(y), "w": int(w), "h": int(h),
         "target_scale": float(target_scale), "method": method,
     }
@@ -513,20 +392,34 @@ def _multiscale_search(bundle, target, fast=True):
         # a blurred/JPEG logo can do the opposite.
         edge_res = cv2.matchTemplate(edge, re, cv2.TM_CCOEFF_NORMED)
         gray_res = cv2.matchTemplate(gray, rg, cv2.TM_CCOEFF_NORMED)
-        # Masked CCORR is a third locator when OpenCV supports it for this mask.
+        # Masked grayscale locator plus a saturation locator.  The latter is
+        # much less sensitive to black/white sample backgrounds.
         try:
             color_res = cv2.matchTemplate(gray, rg, cv2.TM_CCORR_NORMED, mask=rm)
         except Exception:
             color_res = None
+        # Saturation matching is particularly valuable for tiny coloured logos,
+        # but is expensive on large templates.  Use it in the tiny/medium band.
+        sat_res = None
+        if scale <= 0.30:
+            target_sat = cv2.cvtColor(tg, cv2.COLOR_BGR2HSV)[:, :, 1]
+            template_sat = cv2.cvtColor(rt, cv2.COLOR_BGR2HSV)[:, :, 1]
+            try:
+                sat_res = cv2.matchTemplate(target_sat, template_sat, cv2.TM_CCOEFF_NORMED, mask=rm)
+            except Exception:
+                sat_res = cv2.matchTemplate(target_sat, template_sat, cv2.TM_CCOEFF_NORMED)
 
         candidates = []
         for x, y, s in _candidate_points(edge_res, 2 if fast else 3, max(5, min(w, h)//3)):
             candidates.append((x, y, s, "edge"))
         for x, y, s in _candidate_points(gray_res, 2 if fast else 3, max(5, min(w, h)//3)):
             candidates.append((x, y, s, "gray"))
-        if color_res is not None and not fast:
+        if color_res is not None:
             for x, y, s in _candidate_points(color_res, 2 if fast else 3, max(5, min(w, h)//3)):
                 candidates.append((x, y, s, "masked-gray"))
+        if sat_res is not None:
+            for x, y, s in _candidate_points(sat_res, 2 if fast else 3, max(5, min(w, h)//3)):
+                candidates.append((x, y, s, "saturation"))
 
         seen = set()
         for x, y, loc_score, loc_type in candidates:
@@ -547,6 +440,16 @@ def _multiscale_search(bundle, target, fast=True):
             elif second is None or ev["score"] > second["score"]:
                 second = ev
 
+        # Once a tiny candidate has strong independent shape + chroma support,
+        # continuing through every larger scale only adds latency and increases
+        # the chance that unrelated text wins.
+        if (fast and best is not None and min(best["w"], best["h"]) <= 40
+                and best["score"] >= 0.55
+                and best.get("shape", 0.0) >= 0.70
+                and best.get("saturation", 0.0) >= 0.65
+                and best["gray"] >= 0.35):
+            break
+
     if best is None:
         return None
     # Map target-space coordinates back to original image.
@@ -563,28 +466,34 @@ def _multiscale_search(bundle, target, fast=True):
     margin = best["score"] - (second["score"] if second else 0.0)
     # Tiny logos get a slightly lower absolute threshold, but must have a strong
     # structural correlation. This is safer than simply lowering min_confidence.
-    tiny = min(w, h) <= 28
-    absolute = 0.42 if tiny else 0.47
-    structural = max(best["edge"], best["gray"])
-    if best["score"] < absolute or structural < 0.16:
+    tiny = min(w, h) <= 36
+    # Tiny logos have fewer pixels, so require independent chroma/shape support
+    # rather than an unnecessarily high raw correlation.
+    absolute = 0.36 if tiny else 0.45
+    structural = max(best["edge"], best["gray"], best.get("saturation", 0.0))
+    independent = max(best.get("shape", 0.0), best.get("saturation", 0.0), best["edge"])
+    if best["score"] < absolute or structural < 0.10 or independent < 0.12:
         return None
     # If confidence is borderline, require a meaningful separation from the
     # second-best candidate so text/boxes do not win accidentally.
-    if best["score"] < 0.52 and margin < 0.025 and structural < 0.35:
+    if best["score"] < 0.50 and margin < 0.018 and structural < 0.30:
         return None
 
     conf = (
-        0.38 * best["score"] +
-        0.22 * max(0.0, best["edge"]) +
-        0.20 * max(0.0, best["gray"]) +
-        0.10 * best["mae"] +
-        0.10 * min(1.0, max(0.0, margin) * 8.0)
+        0.36 * best["score"] +
+        0.18 * max(0.0, best["edge"]) +
+        0.15 * max(0.0, best["gray"]) +
+        0.11 * max(0.0, best.get("saturation", 0.0)) +
+        0.10 * max(0.0, best.get("shape", 0.0)) +
+        0.05 * best["mae"] +
+        0.05 * min(1.0, max(0.0, margin) * 8.0)
     )
     conf = float(max(0.0, min(1.0, conf)))
     return Detection(True, x, y, w, h, conf, "MultiScaleEnsemble", 0.0,
                      f"edge={best['edge']:.3f}, gray={best['gray']:.3f}, color={best['hsv']:.3f}, "
-                     f"grad={best['gradient']:.3f}, scale={best['w']/w0:.2f}x, margin={margin:.3f}",
-                     {k: best[k] for k in ("score","edge","gray","mae","gradient","hsv","locator")})
+                     f"sat={best.get('saturation',0):.3f}, shape={best.get('shape',0):.3f}, "
+                     f"grad={best['gradient']:.3f}, scale={best['w']/w0:.3f}x, margin={margin:.3f}",
+                     {k: best[k] for k in ("score","edge","gray","mae","gradient","hsv","saturation","shape","locator")})
 
 
 def _feature_match(bundle, target):
@@ -632,6 +541,14 @@ def _feature_match(bundle, target):
     x1=max(0,float(x1)); y1=max(0,float(y1)); x2=min(W0-1,float(x2)); y2=min(H0-1,float(y2))
     w=x2-x1; h=y2-y1
     if w < 6 or h < 6 or w*h > 0.30*W0*H0:
+        return None
+    # A valid homography may change scale and mild perspective, but it should
+    # not turn a square sample into a 2:1 sliver. This prevents SIFT from
+    # matching a fragment of watermark text and then producing a wrong bbox.
+    src_ratio = float(tp.shape[1]) / max(1.0, float(tp.shape[0]))
+    dst_ratio = float(w) / max(1.0, float(h))
+    ratio_factor = max(dst_ratio/src_ratio, src_ratio/dst_ratio)
+    if ratio_factor > 1.75:
         return None
     ir = inliers/max(1,len(good))
     conf = min(1.0, 0.50*ir + 0.50*min(1.0,inliers/12.0))
@@ -681,24 +598,44 @@ def _load_rgba(source):
     return _open_pil(source).convert("RGBA")
 
 
-def _fit_overlay(im, target_w, target_h, scale_percent=8, stretch=False, opacity=100):
+def _content_crop_rgba(im):
+    """Trim transparent/solid matte around a replacement without destroying
+    white pixels that are actually part of the logo."""
+    rgba = np.asarray(im.convert("RGBA"))
+    rgb = rgba[:, :, :3]
+    alpha = rgba[:, :, 3]
+    h, w = rgb.shape[:2]
+    if np.mean(alpha < 245) > 0.005:
+        mask = (alpha > 12).astype(np.uint8) * 255
+    else:
+        border_n = max(1, min(6, int(round(min(h, w) * 0.03))))
+        border = np.concatenate([
+            rgb[:border_n].reshape(-1,3), rgb[-border_n:].reshape(-1,3),
+            rgb[:, :border_n].reshape(-1,3), rgb[:, -border_n:].reshape(-1,3)
+        ], axis=0).astype(np.float32)
+        bg = np.median(border, axis=0)
+        dist = np.linalg.norm(rgb.astype(np.float32) - bg, axis=2)
+        # Prefer a conservative threshold; this catches black/white matte while
+        # preserving white lettering inside a colored logo.
+        threshold = max(12.0, float(np.percentile(dist, 72)) * 0.45)
+        mask = (dist > threshold).astype(np.uint8) * 255
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 8:
+        return im.convert("RGBA")
+    pad = max(1, int(round(min(w, h) * 0.01)))
+    x1=max(0,int(xs.min())-pad); y1=max(0,int(ys.min())-pad)
+    x2=min(w,int(xs.max())+pad+1); y2=min(h,int(ys.max())+pad+1)
+    return im.crop((x1,y1,x2,y2)).convert("RGBA")
+
+
+def _fit_overlay(im, target_w, target_h, scale_percent=0, stretch=False, opacity=100):
+    # Always trim the replacement first.  A 1000x1000 PNG containing a 100x100
+    # logo must not be positioned using its empty canvas.
+    out = _content_crop_rgba(im)
     factor = max(0.20, 1.0 + float(scale_percent)/100.0)
     tw=max(4,int(round(target_w*factor))); th=max(4,int(round(target_h*factor)))
-    out=im.copy()
     if stretch:
-        # Guard against a detected box whose aspect ratio doesn't match the
-        # new emblem (e.g. the old sample's bounding box was distorted by
-        # watermark contamination). Stretching a square logo into a tall/
-        # narrow box makes it visibly warped ("elongated"). If the box ratio
-        # differs from the new emblem's own ratio by more than ~22%, fall
-        # back to a proportional fit instead of a hard stretch.
-        src_ratio = im.width / max(1, im.height)
-        box_ratio = tw / max(1, th)
-        ratio_off = abs(box_ratio - src_ratio) / max(src_ratio, box_ratio)
-        if ratio_off > 0.22:
-            out.thumbnail((tw, th), Image.Resampling.LANCZOS)
-        else:
-            out = out.resize((tw, th), Image.Resampling.LANCZOS)
+        out=out.resize((tw,th),Image.Resampling.LANCZOS)
     else:
         out.thumbnail((tw,th),Image.Resampling.LANCZOS)
     if opacity < 100:
@@ -723,29 +660,20 @@ def _clean_old(src_rgba, template_bytes, det, padding_percent=4):
 
     This avoids the V9 behaviour where a large rectangular inpaint could erase
     nearby question text. A small dilation is added for anti-aliased edges.
-
-    Detection boxes from the feature-match (SIFT/ORB) path are homography-
-    derived and can be a few pixels tighter than the emblem's real extent,
-    especially with a low inlier count. A too-small cleanup padding then
-    leaves a visible sliver of the old logo behind. We therefore use a more
-    generous minimum padding, and always dilate enough to cover typical
-    anti-aliasing/compression halos around the old artwork.
     """
     rgb=np.asarray(src_rgba.convert("RGB")).copy()
     mask=_template_foreground_mask(template_bytes,det)
     if mask is None:
         mask=np.ones((det.h,det.w),np.uint8)*255
-    # Enforce a sane minimum padding regardless of the caller's setting, so a
-    # low-confidence/tight bbox still fully covers the old artwork.
-    effective_padding = max(float(padding_percent), 6.0)
-    pad=max(2,int(round(max(det.w,det.h)*effective_padding/100.0)))
-    k=max(5,2*min(14,pad)+1)
-    mask=cv2.dilate(mask,np.ones((k,k),np.uint8),iterations=1)
+    pad=max(0,int(round(max(det.w,det.h)*padding_percent/100.0)))
+    if pad:
+        k=max(3,2*min(8,pad)+1)
+        mask=cv2.dilate(mask,np.ones((k,k),np.uint8),iterations=1)
     full=np.zeros(rgb.shape[:2],np.uint8)
     x1=max(0,det.x); y1=max(0,det.y); x2=min(rgb.shape[1],det.x+det.w); y2=min(rgb.shape[0],det.y+det.h)
     crop=mask[:y2-y1,:x2-x1]
     full[y1:y2,x1:x2]=crop
-    radius=max(2,min(12,int(round(max(det.w,det.h)*0.06))))
+    radius=max(1,min(8,int(round(max(det.w,det.h)*0.045))))
     cleaned=cv2.inpaint(rgb,full,radius,cv2.INPAINT_TELEA)
     return Image.fromarray(cleaned).convert("RGBA")
 
@@ -767,7 +695,7 @@ def _save_like(source_bytes, image):
     return out.getvalue()
 
 
-def replace_emblem_on_image(image_bytes, template_bytes, replacement_bytes, scale_percent=8,
+def replace_emblem_on_image(image_bytes, template_bytes, replacement_bytes, scale_percent=0,
                             opacity=100, min_confidence=0.45, stretch=False,
                             clean_old=True, cleanup_padding=4):
     src=_open_pil(image_bytes).convert("RGBA")
@@ -785,7 +713,7 @@ def replace_emblem_on_image(image_bytes, template_bytes, replacement_bytes, scal
     return _save_like(image_bytes,src),det
 
 
-def preview_emblem(image_bytes,template_bytes,replacement_bytes,scale_percent=8,opacity=100,
+def preview_emblem(image_bytes,template_bytes,replacement_bytes,scale_percent=0,opacity=100,
                    min_confidence=0.45,stretch=False,clean_old=True,cleanup_padding=4):
     out,det=replace_emblem_on_image(image_bytes,template_bytes,replacement_bytes,scale_percent,opacity,min_confidence,stretch,clean_old,cleanup_padding)
     if det.found:
@@ -805,7 +733,7 @@ def annotate_detection(image_bytes,det,color=(0,180,80),width=4):
 
 
 def replace_emblems_in_docx(input_path,output_path,template_bytes,replacement_bytes,
-                            scale_percent=8,opacity=100,min_confidence=0.45,stretch=False,
+                            scale_percent=0,opacity=100,min_confidence=0.45,stretch=False,
                             clean_old=True,cleanup_padding=4):
     from watermark import _read_zip_entry_tolerant, SUPPORTED_EXTENSIONS
     report={"total_media":0,"found":0,"not_found":0,"repaired":0,"failed":0,"changed":0,"details":[]}

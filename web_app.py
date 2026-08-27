@@ -325,7 +325,7 @@ def _render_emblem_editor(data, docx_mode=True):
       • if a different image has the same block at another position/size, the
         detector searches for it automatically.
     """
-    st.title("🏷️ Emblema almashtirish — PRO V10")
+    st.title("🏷️ Emblema almashtirish — PRO V11")
     st.caption("Emblema almashtirish watermark sahifasidan mustaqil ishlaydi. Qaysi qismni eski namuna sifatida belgilasangiz, aynan o‘sha qism qidiriladi va almashtiriladi.")
 
     sources = _session_image_sources(data, docx_mode=docx_mode)
@@ -405,7 +405,7 @@ def _render_emblem_editor(data, docx_mode=True):
     if old_bytes:
         st.success(f"✅ Eski namuna tayyor: {old_name}")
         st.image(old_bytes, caption="Eski namuna — tizim aynan shu blokni qidiradi", width=300)
-        st.caption("Agar namuna ichida qora/oq fon qolgan bo‘lsa ham V10 namunaning oq, qora yoki shaffof fonini avtomatik ajratishga harakat qiladi; o‘lcham, siqilish va kichik aylanish farqlariga ham chidamli. Eng yaxshi natija: shaffof PNG.")
+        st.caption("Qora/oq fonli namuna ham ishlaydi. V11 kichik emblemani (hatto ~18–25 px) alohida qidiradi, fon rangini emas shakl/rang/kontur tuzilmasini solishtiradi. Eng yaxshi natija: shaffof PNG, lekin majburiy emas.")
 
     # --- 2. New sample -------------------------------------------------
     st.subheader("2️⃣ Yangi emblema")
@@ -423,7 +423,7 @@ def _render_emblem_editor(data, docx_mode=True):
     st.subheader("3️⃣ O‘lcham, tozalash va aniqlik")
     c1, c2, c3 = st.columns(3)
     with c1:
-        scale = st.slider("📐 Eski o‘lchamga qo‘shimcha", -10, 35, 8, 1, key="v9_emblem_scale")
+        scale = st.slider("📐 Eski o‘lchamga qo‘shimcha", -25, 35, 0, 1, key="v9_emblem_scale")
     with c2:
         opacity = st.slider("👻 Shaffoflik", 10, 100, 100, 1, key="v9_emblem_opacity")
     with c3:
@@ -457,7 +457,7 @@ def _render_emblem_editor(data, docx_mode=True):
                 if det.found:
                     st.image(annotate_detection(target, det), caption=f"✅ Topildi • {det.confidence:.0%} • {det.method}", use_container_width=True)
                     st.success(f"📍 x={det.x}, y={det.y} • {det.w}×{det.h}px • {det.reason}")
-                    st.caption("🟢 Qizil/yashil quti — aynan shu qism almashtiriladi. Namuna birga olingan bo‘lsa, quti ham birga bo‘ladi.")
+                    st.caption("🟢 Ramka — aynan shu qism almashtiriladi. Faqat emblem kesilgan bo‘lsa faqat emblem; emblem + Telegram birga kesilgan bo‘lsa butun blok almashtiriladi. Fon (oq/qora) qidiruvga to‘sqinlik qilmaydi.")
                 else:
                     st.warning(f"⚠️ Topilmadi: {det.reason}")
         with b:
