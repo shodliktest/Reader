@@ -1,5 +1,5 @@
 """
-V10 PRO — robust emblem/logo detector + replacer for Word images.
+V12 PRO — robust emblem/logo detector + replacer for Word images.
 
 Design goals
 ------------
@@ -16,7 +16,7 @@ Design goals
   watermark.py. One broken image never stops the rest of the document.
 
 No computer-vision system can mathematically guarantee detection for an arbitrary
-unknown distortion. V10 therefore keeps the manual crop workflow as the final
+unknown distortion. V12 therefore keeps the manual crop workflow as the final
 fallback while making automatic detection substantially more tolerant.
 """
 from __future__ import annotations
@@ -163,8 +163,19 @@ def _trim_template(source, pad=3):
     return im.crop((x1, y1, x2, y2)), mask[y1:y2, x1:x2]
 
 
-def _template_bundle(source):
-    cropped, fg = _trim_template(source)
+def _template_bundle(source, trim=True):
+    """Build a matching bundle.
+
+    ``trim=True`` is the normal/background-independent path. ``trim=False``
+    keeps the original canvas as a fallback for samples whose matte is part of
+    the actual target (for example a black square copied into a 20px Word image).
+    """
+    original = _open_pil(source).convert("RGBA")
+    if trim:
+        cropped, fg = _trim_template(original)
+    else:
+        cropped = original
+        fg = _choose_mask(original)
     rgba = np.asarray(cropped.convert("RGBA"))
     rgb = rgba[:, :, :3]
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -205,8 +216,8 @@ def _dense_scales(fast=True):
     # emblem may become only 18–35 px inside a Word screenshot.  Keep the fast
     # path compact enough for multiple images; the deep path fills the gaps.
     if fast:
-        vals = [0.025, 0.028, 0.032, 0.036, 0.040, 0.045, 0.050, 0.060,
-                0.075, 0.090, 0.12, 0.18, 0.30, 0.50, 0.80, 1.0, 1.25, 1.6, 2.0, 2.5]
+        vals = [0.025, 0.032, 0.040, 0.050, 0.060, 0.075, 0.090, 0.12,
+                0.15, 0.18, 0.22, 0.30, 0.40, 0.50, 0.80, 1.0, 1.5, 2.0, 2.5]
     else:
         vals = list(np.geomspace(0.018, 4.5, 30))
         vals += [0.02, 0.025, 0.028, 0.032, 0.036, 0.040, 0.045, 0.050,
@@ -372,6 +383,7 @@ def _multiscale_search(bundle, target, fast=True):
 
     gray = cv2.cvtColor(tg, cv2.COLOR_BGR2GRAY)
     edge = cv2.Canny(gray, 35, 125)
+    target_sat = cv2.cvtColor(tg, cv2.COLOR_BGR2HSV)[:, :, 1]
     best = None
     second = None
 
@@ -401,8 +413,7 @@ def _multiscale_search(bundle, target, fast=True):
         # Saturation matching is particularly valuable for tiny coloured logos,
         # but is expensive on large templates.  Use it in the tiny/medium band.
         sat_res = None
-        if scale <= 0.30:
-            target_sat = cv2.cvtColor(tg, cv2.COLOR_BGR2HSV)[:, :, 1]
+        if scale <= 0.40:
             template_sat = cv2.cvtColor(rt, cv2.COLOR_BGR2HSV)[:, :, 1]
             try:
                 sat_res = cv2.matchTemplate(target_sat, template_sat, cv2.TM_CCOEFF_NORMED, mask=rm)
@@ -410,15 +421,16 @@ def _multiscale_search(bundle, target, fast=True):
                 sat_res = cv2.matchTemplate(target_sat, template_sat, cv2.TM_CCOEFF_NORMED)
 
         candidates = []
-        for x, y, s in _candidate_points(edge_res, 2 if fast else 3, max(5, min(w, h)//3)):
+        topn = 1 if fast else 2
+        for x, y, s in _candidate_points(edge_res, topn, max(5, min(w, h)//3)):
             candidates.append((x, y, s, "edge"))
-        for x, y, s in _candidate_points(gray_res, 2 if fast else 3, max(5, min(w, h)//3)):
+        for x, y, s in _candidate_points(gray_res, topn, max(5, min(w, h)//3)):
             candidates.append((x, y, s, "gray"))
         if color_res is not None:
-            for x, y, s in _candidate_points(color_res, 2 if fast else 3, max(5, min(w, h)//3)):
+            for x, y, s in _candidate_points(color_res, topn, max(5, min(w, h)//3)):
                 candidates.append((x, y, s, "masked-gray"))
         if sat_res is not None:
-            for x, y, s in _candidate_points(sat_res, 2 if fast else 3, max(5, min(w, h)//3)):
+            for x, y, s in _candidate_points(sat_res, topn, max(5, min(w, h)//3)):
                 candidates.append((x, y, s, "saturation"))
 
         seen = set()
@@ -559,32 +571,50 @@ def _feature_match(bundle, target):
 
 
 def detect_emblem(template_bytes, image_bytes, min_confidence=0.45):
+    """Detect an emblem with a background-aware two-pass strategy.
+
+    Pass 1 removes white/black/transparent matte and is therefore ideal when a
+    sample was cropped from a white page.  Pass 2 is a raw-canvas fallback and
+    is used only when pass 1 is weak; this matters when the matte itself is
+    present in the target image (especially tiny black/white 18–30px logos).
+    """
     try:
-        bundle = _template_bundle(template_bytes)
         target = _pil_to_bgr(image_bytes)
+        threshold = max(0.30, float(min_confidence))
+        candidates = []
+
+        # Normal, matte-independent pass.
+        bundle = _template_bundle(template_bytes, trim=True)
         if min(bundle["bgr"].shape[:2]) < 6:
             return Detection(False, reason="Namuna juda kichik.")
-
-        candidates = []
         d1 = _multiscale_search(bundle, target, fast=True)
         if d1:
             candidates.append(d1)
-        # If fast search is weak, run the deeper scale grid.
-        if not d1 or d1.confidence < max(0.50, float(min_confidence) + 0.03):
+        if not d1 or d1.confidence < max(0.50, threshold + 0.03):
             dslow = _multiscale_search(bundle, target, fast=False)
             if dslow:
                 candidates.append(dslow)
-        # Feature matching is valuable for rotation/perspective and also acts as
-        # an independent vote against false positives.
         if not d1 or d1.confidence < 0.68:
             d2 = _feature_match(bundle, target)
             if d2:
                 candidates.append(d2)
-        if not candidates:
-            return Detection(False, reason="Emblema topilmadi. Namuna sifati, o‘lchami yoki target siqilishi juda farq qilishi mumkin.")
 
-        best = max(candidates, key=lambda d: d.confidence)
-        threshold = max(0.30, float(min_confidence))
+        best = max(candidates, key=lambda d: d.confidence) if candidates else None
+
+        # Raw-canvas fallback.  Do not pay this cost when the normal pass is
+        # already convincing; this keeps DOCX batches practical on Streamlit.
+        if best is None or best.confidence < max(0.55, threshold + 0.08):
+            raw = _template_bundle(template_bytes, trim=False)
+            rd = _multiscale_search(raw, target, fast=True)
+            if rd:
+                candidates.append(rd)
+            raw_best = max((d for d in candidates if d is not None),
+                           key=lambda d: d.confidence, default=None)
+            if raw_best and (best is None or raw_best.confidence > best.confidence):
+                best = raw_best
+
+        if best is None:
+            return Detection(False, reason="Emblema topilmadi. Namuna sifati, o‘lchami yoki target siqilishi juda farq qilishi mumkin.")
         if best.confidence < threshold:
             return Detection(False, confidence=best.confidence, method=best.method,
                              reason=f"Eng yaxshi nomzod {best.confidence:.0%}; minimal {threshold:.0%}.",
@@ -732,37 +762,101 @@ def annotate_detection(image_bytes,det,color=(0,180,80),width=4):
     out=io.BytesIO(); Image.fromarray(cv2.cvtColor(cv,cv2.COLOR_BGR2RGB)).save(out,format="PNG"); return out.getvalue()
 
 
+def _replace_emblems_in_zip(zin, zout, template_bytes, replacement_bytes,
+                            scale_percent=0, opacity=100, min_confidence=0.45,
+                            stretch=False, clean_old=True, cleanup_padding=4):
+    from watermark import _read_zip_entry_tolerant, SUPPORTED_EXTENSIONS
+    report={"total_media":0,"found":0,"not_found":0,"repaired":0,"failed":0,"changed":0,"details":[]}
+    for item in zin.infolist():
+        lower=item.filename.lower(); ext=os.path.splitext(lower)[1]
+        is_media=lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS
+        try:
+            data,tolerant=_read_zip_entry_tolerant(zin,item)
+        except Exception as exc:
+            if is_media:
+                report["failed"]+=1
+                report["details"].append({"name":item.filename,"status":"failed","reason":str(exc)})
+                # Keep the rest of the DOCX intact. A truly unreadable media
+                # entry cannot be reconstructed, but it must not stop others.
+                continue
+            raise
+
+        if is_media:
+            report["total_media"]+=1
+            if tolerant:
+                report["repaired"]+=1
+            try:
+                replaced,det=replace_emblem_on_image(
+                    data,template_bytes,replacement_bytes,
+                    scale_percent,opacity,min_confidence,stretch,
+                    clean_old,cleanup_padding
+                )
+                if det.found:
+                    data=replaced
+                    report["found"]+=1; report["changed"]+=1
+                    report["details"].append({
+                        "name":item.filename,"status":"replaced",
+                        "confidence":round(det.confidence,4),"method":det.method,
+                        "bbox":[det.x,det.y,det.w,det.h],"crc_bad":bool(tolerant),
+                        "details":det.details,
+                    })
+                else:
+                    report["not_found"]+=1
+                    report["details"].append({
+                        "name":item.filename,"status":"not_found",
+                        "reason":det.reason,"confidence":round(det.confidence,4),
+                        "crc_bad":bool(tolerant),
+                    })
+            except Exception as exc:
+                report["failed"]+=1
+                report["details"].append({"name":item.filename,"status":"failed","reason":str(exc)})
+
+        # Always rewrite media entries so stale CRC metadata is repaired.
+        info=deepcopy(item)
+        if tolerant or is_media:
+            info.CRC=None
+            info.file_size=len(data)
+            info.compress_size=0
+        zout.writestr(info,data)
+    return report
+
+
+def replace_emblems_in_docx_bytes(docx_bytes, template_bytes, replacement_bytes,
+                                  scale_percent=0, opacity=100, min_confidence=0.45,
+                                  stretch=False, clean_old=True, cleanup_padding=4):
+    """Replace emblems in a DOCX entirely in memory.
+
+    This is the preferred web-app path: it eliminates /tmp filename races and
+    guarantees that a successful processing report has an actual output blob.
+    """
+    src=io.BytesIO(docx_bytes)
+    dst=io.BytesIO()
+    with zipfile.ZipFile(src,"r") as zin, zipfile.ZipFile(dst,"w",compression=zipfile.ZIP_DEFLATED) as zout:
+        report=_replace_emblems_in_zip(
+            zin,zout,template_bytes,replacement_bytes,
+            scale_percent,opacity,min_confidence,stretch,clean_old,cleanup_padding
+        )
+    return dst.getvalue(), report
+
+
 def replace_emblems_in_docx(input_path,output_path,template_bytes,replacement_bytes,
                             scale_percent=0,opacity=100,min_confidence=0.45,stretch=False,
                             clean_old=True,cleanup_padding=4):
-    from watermark import _read_zip_entry_tolerant, SUPPORTED_EXTENSIONS
-    report={"total_media":0,"found":0,"not_found":0,"repaired":0,"failed":0,"changed":0,"details":[]}
-    with zipfile.ZipFile(input_path,"r") as zin, zipfile.ZipFile(output_path,"w",compression=zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            lower=item.filename.lower(); ext=os.path.splitext(lower)[1]
-            is_media=lower.startswith("word/media/") and ext in SUPPORTED_EXTENSIONS
-            try:
-                data,tolerant=_read_zip_entry_tolerant(zin,item)
-            except Exception as exc:
-                if is_media:
-                    report["failed"]+=1; report["details"].append({"name":item.filename,"status":"failed","reason":str(exc)}); continue
-                raise
-            if is_media:
-                report["total_media"]+=1
-                if tolerant: report["repaired"]+=1
-                try:
-                    replaced,det=replace_emblem_on_image(data,template_bytes,replacement_bytes,scale_percent,opacity,min_confidence,stretch,clean_old,cleanup_padding)
-                    if det.found:
-                        data=replaced; report["found"]+=1; report["changed"]+=1
-                        report["details"].append({"name":item.filename,"status":"replaced","confidence":round(det.confidence,4),"method":det.method,"bbox":[det.x,det.y,det.w,det.h],"crc_bad":bool(tolerant),"details":det.details})
-                    else:
-                        report["not_found"]+=1; report["details"].append({"name":item.filename,"status":"not_found","reason":det.reason,"confidence":round(det.confidence,4),"crc_bad":bool(tolerant)})
-                except Exception as exc:
-                    report["failed"]+=1; report["details"].append({"name":item.filename,"status":"failed","reason":str(exc)})
-            info=deepcopy(item)
-            # Recompute ZIP metadata for all media entries. This repairs the
-            # central-directory CRC even when the source CRC was stale.
-            if tolerant or is_media:
-                info.CRC=None; info.file_size=len(data); info.compress_size=0
-            zout.writestr(info,data)
+    """File-path compatibility wrapper around the in-memory implementation."""
+    with open(input_path,"rb") as f:
+        docx_bytes=f.read()
+    output_bytes, report=replace_emblems_in_docx_bytes(
+        docx_bytes,template_bytes,replacement_bytes,
+        scale_percent,opacity,min_confidence,stretch,clean_old,cleanup_padding
+    )
+    # Atomic replace: never leave a half-written output behind.
+    out_dir=os.path.dirname(os.path.abspath(output_path)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_path=output_path+".tmp"
+    with open(tmp_path,"wb") as f:
+        f.write(output_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path,output_path)
     return report
+

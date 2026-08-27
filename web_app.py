@@ -58,7 +58,8 @@ import session_store
 from docx_builder import build_docx
 from watermark import DEFAULT_SETTINGS, normalize_settings, preview_bytes, extract_docx_media_tolerant, watermark_docx, STYLE_LABELS, FONT_LABELS
 from processor import detect_photo_region
-from emblem import detect_emblem, replace_emblem_on_image, replace_emblems_in_docx, annotate_detection
+from emblem import (detect_emblem, replace_emblem_on_image, replace_emblems_in_docx,
+                    replace_emblems_in_docx_bytes, annotate_detection)
 
 # Streamlit Cloud'da API kalitlar "Secrets" bo'limida saqlanadi (st.secrets),
 # lekin bot.py va processor.py bularni oddiy os.environ orqali o'qiydi -
@@ -256,8 +257,13 @@ def ensure_bot_running():
     _start_bot_once()
 
 
-def send_docx_to_telegram(chat_id, file_path, filename, session_id=None):
-    """Tayyor Word'ni Telegram'ga yuboradi va ikkita mustaqil Web tugma beradi."""
+def send_docx_to_telegram(chat_id, file_path_or_bytes, filename, session_id=None):
+    """Send a DOCX to Telegram.
+
+    Accepts either a filesystem path or raw bytes.  Bytes are preferred for
+    emblem replacement because Streamlit reruns/concurrent sessions can make
+    shared /tmp paths race with cleanup.
+    """
     if not BOT_TOKEN:
         st.error("BOT_TOKEN sozlanmagan - Word faylni Telegram'ga yubora olmayman.")
         return False
@@ -274,12 +280,30 @@ def send_docx_to_telegram(chat_id, file_path, filename, session_id=None):
                 ]
             }
 
-    with open(file_path, 'rb') as f:
-        files = {'document': (filename, f, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
-        data = {'chat_id': chat_id}
-        if reply_markup:
-            data['reply_markup'] = json.dumps(reply_markup, ensure_ascii=False)
-        resp = requests.post(url, data=data, files=files, timeout=90)
+    try:
+        if isinstance(file_path_or_bytes, (bytes, bytearray, memoryview)):
+            file_obj = io.BytesIO(bytes(file_path_or_bytes))
+            file_obj.name = filename
+            files = {'document': (filename, file_obj,
+                                  'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
+            data = {'chat_id': chat_id}
+            if reply_markup:
+                data['reply_markup'] = json.dumps(reply_markup, ensure_ascii=False)
+            resp = requests.post(url, data=data, files=files, timeout=90)
+        else:
+            with open(file_path_or_bytes, 'rb') as f:
+                files = {'document': (filename, f,
+                                      'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
+                data = {'chat_id': chat_id}
+                if reply_markup:
+                    data['reply_markup'] = json.dumps(reply_markup, ensure_ascii=False)
+                resp = requests.post(url, data=data, files=files, timeout=90)
+    except OSError as exc:
+        st.error(f"❌ Word faylga kirishda xatolik: {exc}")
+        return False
+    except requests.RequestException as exc:
+        st.error(f"❌ Telegram tarmoq xatosi: {exc}")
+        return False
 
     if resp.status_code != 200:
         st.error(f"Telegram'ga yuborishda xatolik: {resp.text}")
@@ -498,21 +522,24 @@ def _render_emblem_editor(data, docx_mode=True):
         st.subheader("5️⃣ Yakuniy almashtirish")
         st.info("🔒 Har bir Word rasmi mustaqil tekshiriladi. Bir rasmda CRC yoki detection xatosi bo‘lsa ham qolgan rasmlar davom etadi. Namuna faqat emblem bo‘lsa — faqat emblem; emblem + Telegram birga tanlangan bo‘lsa — ikkalasi birga almashtiriladi.")
         if st.button("🏷️ Emblemani barcha Word rasmlariga almashtirish", use_container_width=True, type="primary", key="v9_apply"):
-            in_path = f"/tmp/{data['session_id']}_emblem_input.docx"
-            out_path = f"/tmp/{data['session_id']}_emblem_output.docx"
             try:
-                docx_bytes = base64.b64decode(data.get("docx_b64", ""))
-                with open(in_path, "wb") as f:
-                    f.write(docx_bytes)
+                docx_bytes = base64.b64decode(data.get("docx_b64", ""), validate=True)
+                if not docx_bytes:
+                    raise ValueError("DOCX ma'lumoti bo'sh.")
                 with st.spinner("🔍 Har bir Word rasmini tekshirish, eski belgini tozalash va yangi emblemani joylashtirish..."):
-                    report = replace_emblems_in_docx(
-                        in_path, out_path, old_bytes, new_bytes,
+                    # IMPORTANT: process in memory.  This removes the /tmp output
+                    # race that previously caused "No such file or directory"
+                    # when Telegram sending happened after a Streamlit rerun.
+                    output_bytes, report = replace_emblems_in_docx_bytes(
+                        docx_bytes, old_bytes, new_bytes,
                         scale_percent=scale, opacity=opacity,
                         min_confidence=confidence/100.0,
                         stretch=stretch, clean_old=True, cleanup_padding=cleanup,
                     )
+                if not output_bytes or len(output_bytes) < 100:
+                    raise IOError("Yakuniy DOCX hosil bo'lmadi yoki bo'sh chiqdi.")
                 ok = send_docx_to_telegram(
-                    data.get("telegram_chat_id"), out_path,
+                    data.get("telegram_chat_id"), output_bytes,
                     data.get("default_filename", "emblem_replaced.docx"),
                     session_id=data["session_id"],
                 )
@@ -526,10 +553,6 @@ def _render_emblem_editor(data, docx_mode=True):
                     session_store.update_session(data["session_id"], status="ready_for_review")
             except Exception as e:
                 st.error(f"❌ Emblemalarni almashtirishda xatolik: {e}")
-            finally:
-                for pp in (in_path, out_path):
-                    try: os.remove(pp)
-                    except Exception: pass
     else:
         st.warning("⬆️ Avval eski namuna (yuklash yoki rasmdan kesish) va yangi emblemani bering.")
 
