@@ -811,7 +811,7 @@ def _render_image_replace_editor(data):
     6) Alohida tugma orqali yakuniy Word Telegramga yuboriladi.
     """
     st.title("🖼️ Rasm almashtirish — PRO")
-    st.caption("Yangi rasmlar manbasi faqat Telegram chat orqali yuborilgan rasmlar.zip. Bot ZIPni bir marta ochib, rasmlarni RAMga tayyorlaydi; sayt ZIP qabul qilmaydi.")
+    st.caption("Yangi rasmlar manbasi Telegram chat orqali yuborilgan ZIP qismlaridir. Har bir ZIP qismi bot tomonidan ochiladi va barcha rasmlar bitta RAM kolleksiyasiga birlashtiriladi; sayt ZIP qabul qilmaydi.")
 
     docx_b64 = data.get("docx_b64", "")
     if not docx_b64:
@@ -863,7 +863,7 @@ def _render_image_replace_editor(data):
     with c1:
         st.image(old_bytes, caption=f"🟥 AVVALGI • {old_item['name']}", use_container_width=True)
     with c2:
-        st.info("📦 Yangi rasmlar bot chatiga yuborilgan rasmlar.zip faylidan olinadi.")
+        st.info("📦 Yangi rasmlar bot chatiga yuborilgan ZIP qismlaridan olinadi. Barcha qismlar bot tomonidan ochilib, bitta RAM kolleksiyasiga jamlanadi.")
 
     st.divider()
     st.subheader("2️⃣ Yangi rasmlar manbasi")

@@ -36,6 +36,7 @@ import logging
 import zipfile
 import html
 import base64
+import hashlib
 from datetime import datetime
 
 # MUHIM: bot.py Streamlit'ning fon-thread'i ichida ishga tushirilganda
@@ -87,10 +88,13 @@ if BOT_TOKEN:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 VALID_IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
+IMAGE_REPLACE_PART_MAX_BYTES = 20 * 1024 * 1024
+IMAGE_REPLACE_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+IMAGE_REPLACE_MAX_IMAGES = 5000
 
 
 def _extract_image_zip_for_ram(zip_bytes):
-    """ZIPni botning o'z processida ochib, barcha haqiqiy rasmlarni RAMga tayyorlaydi."""
+    """Bitta ZIP qismini ochib, haqiqiy rasmlarni RAM uchun tayyorlaydi."""
     items = []
     total = 0
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
@@ -106,14 +110,13 @@ def _extract_image_zip_for_ram(zip_bytes):
             if info.file_size > 30 * 1024 * 1024:
                 continue
             total += info.file_size
-            if total > 500 * 1024 * 1024:
+            if total > IMAGE_REPLACE_MAX_TOTAL_BYTES:
                 break
             raw = zf.read(info)
             try:
                 from PIL import Image
                 im = Image.open(io.BytesIO(raw))
                 im.load()
-                # Faqat haqiqiy ochiladigan rasmlarni qabul qilamiz.
                 width, height = im.width, im.height
                 im.convert('RGB')
                 items.append({
@@ -122,10 +125,71 @@ def _extract_image_zip_for_ram(zip_bytes):
                     'data': raw,
                     'width': width,
                     'height': height,
+                    'sha256': hashlib.sha256(raw).hexdigest(),
                 })
             except Exception:
                 continue
     return items
+
+
+def image_replace_parts_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✅ Barcha ZIP qismlarini yubordim', callback_data='imgrep_parts_done')],
+        [InlineKeyboardButton(text='❌ Bekor qilish', callback_data='imgrep_parts_cancel')],
+    ])
+
+
+def _merge_image_replace_part(chat_id, zip_name, images):
+    """ZIP qismini avvalgi qismlar bilan birlashtirib, faqat RAMda saqlaydi."""
+    saved = session_store.get_user_asset(chat_id, 'image_zip') or {}
+    existing = list(saved.get('images') or [])
+    seen = {x.get('sha256') for x in existing if x.get('sha256')}
+    added = []
+    for item in images:
+        digest = item.get('sha256') or hashlib.sha256(item['data']).hexdigest()
+        if digest in seen:
+            continue
+        item['sha256'] = digest
+        existing.append(item)
+        added.append(item)
+        seen.add(digest)
+        if len(existing) >= IMAGE_REPLACE_MAX_IMAGES:
+            break
+
+    total_bytes = sum(len(x.get('data', b'')) for x in existing)
+    if total_bytes > IMAGE_REPLACE_MAX_TOTAL_BYTES:
+        # Limitdan oshib ketgan oxirgi rasmlarni qaytaramiz.
+        kept = []
+        size = 0
+        for item in existing:
+            item_size = len(item.get('data', b''))
+            if size + item_size > IMAGE_REPLACE_MAX_TOTAL_BYTES:
+                break
+            kept.append(item)
+            size += item_size
+        existing = kept
+        kept_hashes = {x.get('sha256') for x in existing}
+        added = [x for x in added if x.get('sha256') in kept_hashes]
+        total_bytes = size
+
+    part_names = list(saved.get('part_names') or [])
+    if zip_name and zip_name not in part_names:
+        part_names.append(zip_name)
+
+    asset = {
+        'file_id': saved.get('file_id'),
+        'file_name': zip_name or saved.get('file_name') or 'rasmlar_qismlari.zip',
+        'uploaded_at': saved.get('uploaded_at') or datetime.now().isoformat(),
+        'updated_at': datetime.now().isoformat(),
+        'images': existing,
+        'image_count': len(existing),
+        'total_bytes': total_bytes,
+        'part_names': part_names,
+        'part_count': len(part_names),
+    }
+    session_store.set_user_asset(chat_id, 'image_zip', asset)
+    return asset, added
+
 
 # Foydalanuvchining hozirgi FAOL sessiya ID'sini eslab turish uchun (chat_id -> session_id).
 # Bu RAM'da, chunki har bir foydalanuvchi bir vaqtning o'zida faqat bitta faol
@@ -401,8 +465,9 @@ async def image_replace_start(callback: CallbackQuery):
         _image_replace_waiting[chat_id] = session_id
         await callback.message.answer(
             "🖼️ <b>Rasm almashtirish</b>\n\n"
-            "Iltimos, <b>rasmlar.zip</b> faylini shu chatga yuboring.\n"
-            "ZIP ichidagi rasmlar keyin avtomatik ochilib, moslik bo'yicha tekshiriladi.",
+            "Iltimos, <b>rasmlar.zip</b> yoki uning <b>20 MB dan kichik qismlarini</b> yuboring.\n"
+            "Har bir ZIP qismi ochilib, rasmlar bitta RAM kolleksiyasiga qo'shib boriladi.\n"
+            "Oxirida <b>✅ Barcha ZIP qismlarini yubordim</b> tugmasini bosing.",
         )
     await callback.answer()
 
@@ -414,9 +479,53 @@ async def image_replace_new_zip(callback: CallbackQuery):
     if not sid:
         await callback.answer("Word sessiyasi topilmadi. Word faylni qaytadan yuboring.", show_alert=True)
         return
+    # "Yangi" bosilganda avvalgi to'plamni almashtiramiz. Keyingi barcha ZIP
+    # qismlari shu bitta RAM kolleksiyasiga qo'shiladi.
+    session_store.clear_user_asset(chat_id, "image_zip")
     _image_replace_waiting[chat_id] = sid
-    await callback.message.answer("📤 Yangi <b>rasmlar.zip</b> faylini shu chatga yuboring.")
+    await callback.message.answer(
+        "📤 Yangi <b>rasmlar.zip</b> to'plamini yuboring.\n\n"
+        "⚠️ Agar fayllar 20 MB limitdan katta bo'lsa, ZIPni 20 MB dan kichik "
+        "<b>qismlarga</b> bo'lib yuboring. Har bir qism yuborilganda bot uni "
+        "ochib, rasmlarni avvalgi qismlarga qo'shib boradi.\n\n"
+        "Oxirgi qismdan keyin <b>✅ Barcha ZIP qismlarini yubordim</b> tugmasini bosing."
+    )
     await callback.answer()
+
+
+@dp.callback_query(F.data == "imgrep_parts_done")
+async def image_replace_parts_done(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    sid = _image_replace_waiting.pop(chat_id, None)
+    saved = session_store.get_user_asset(chat_id, "image_zip")
+    if not sid or not saved or not saved.get("images"):
+        await callback.answer("Avval kamida bitta ZIP qismini yuboring.", show_alert=True)
+        return
+
+    session_store.update_session(
+        sid,
+        image_replace_zip_name=saved.get("file_name", "rasmlar_qismlari.zip"),
+        image_replace_zip_ready=True,
+    )
+    kb = image_replace_web_keyboard(sid)
+    await callback.message.answer(
+        f"✅ <b>Rasmlar to'plami tayyor.</b>\n\n"
+        f"📦 ZIP qismlari: <b>{saved.get('part_count', 1)}</b> ta\n"
+        f"🖼️ RAMda jamlangan rasmlar: <b>{saved.get('image_count', len(saved.get('images', [])))}</b> ta\n"
+        f"💾 Hajmi: <b>{saved.get('total_bytes', 0) / (1024*1024):.1f} MB</b>\n\n"
+        "Endi barcha qismlar bitta RAM kolleksiyasi sifatida ishlatiladi.",
+        reply_markup=kb,
+    )
+    await callback.answer("Tayyor!")
+
+
+@dp.callback_query(F.data == "imgrep_parts_cancel")
+async def image_replace_parts_cancel(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    _image_replace_waiting.pop(chat_id, None)
+    session_store.clear_user_asset(chat_id, "image_zip")
+    await callback.message.answer("❌ Rasm qismlarini yig'ish bekor qilindi. RAM cache tozalandi.")
+    await callback.answer("Bekor qilindi")
 
 
 @dp.callback_query(F.data == "imgrep_use_saved")
@@ -653,57 +762,78 @@ async def handle_document(message: Message):
     doc = message.document
     fname = (doc.file_name or "").lower()
 
-    # Rasm-almashtirish ZIP'i chatning o'zidan olinadi va DARHOL RAMga ochiladi.
-    # Keyingi Streamlit sahifa Telegramdan qayta download qilmaydi.
+    # Rasm-almashtirish uchun ZIP endi BIR NECHTA QISM sifatida qabul qilinadi.
+    # Har bir qism Telegram Cloud 20 MB download limitiga mos bo'lishi kerak.
+    # Har bir ZIP darhol ochiladi va rasmlar avvalgi qismlar bilan RAMda birlashtiriladi.
     if fname.endswith('.zip') and chat_id in _image_replace_waiting:
-        replace_sid = _image_replace_waiting.pop(chat_id)
+        replace_sid = _image_replace_waiting[chat_id]
         try:
-            if getattr(doc, "file_size", 0) and doc.file_size > 20 * 1024 * 1024:
+            file_size = getattr(doc, "file_size", 0) or 0
+            if file_size > IMAGE_REPLACE_PART_MAX_BYTES:
                 await message.answer(
                     f"❌ <b>{html.escape(doc.file_name or 'rasmlar.zip')}</b> hajmi "
-                    f"{doc.file_size / (1024*1024):.1f} MB.\n\n"
-                    "Oddiy Telegram Bot API Cloud orqali bot bunday faylni yuklab ololmaydi (20 MB limit). "
-                    "ZIPni 20 MB dan kichik qismlarga ajrating yoki Local Bot API Server ishlating."
+                    f"{file_size / (1024*1024):.1f} MB.\n\n"
+                    "Telegram Cloud 20 MB download limitidan oshmasligi uchun ZIPni "
+                    "20 MB dan kichik qismlarga bo'lib yuboring."
                 )
                 return
+
             file = await bot.get_file(doc.file_id)
             buf = io.BytesIO()
             await bot.download_file(file.file_path, destination=buf)
             zip_bytes = buf.getvalue()
-            images = await asyncio.to_thread(_extract_image_zip_for_ram, zip_bytes)
+            del buf
+
+            part_images = await asyncio.to_thread(_extract_image_zip_for_ram, zip_bytes)
             del zip_bytes
-            if not images:
+            if not part_images:
                 await message.answer(
-                    "❌ ZIP ochildi, lekin ichidan o'qiladigan PNG/JPG/JPEG/WEBP/BMP/TIFF rasm topilmadi."
+                    "❌ Bu ZIP qismida o'qiladigan PNG/JPG/JPEG/WEBP/BMP/TIFF rasm topilmadi. "
+                    "Boshqa qismni yuborishingiz mumkin."
                 )
                 return
-            session_store.set_user_asset(chat_id, "image_zip", {
-                "file_id": doc.file_id,
-                "file_name": doc.file_name or "rasmlar.zip",
-                "uploaded_at": datetime.now().isoformat(),
-                "images": images,
-                "image_count": len(images),
-            })
-            session_store.update_session(
-                replace_sid,
-                image_replace_zip_name=doc.file_name or "rasmlar.zip",
-                image_replace_zip_ready=True,
+
+            asset, added = _merge_image_replace_part(
+                chat_id, doc.file_name or f"rasmlar_part_{datetime.now().strftime('%H%M%S')}.zip", part_images
             )
-            kb = image_replace_web_keyboard(replace_sid)
+            total = asset.get('image_count', 0)
+            total_mb = asset.get('total_bytes', 0) / (1024 * 1024)
+            duplicates = len(part_images) - len(added)
+
+            if total >= IMAGE_REPLACE_MAX_IMAGES or asset.get('total_bytes', 0) >= IMAGE_REPLACE_MAX_TOTAL_BYTES:
+                _image_replace_waiting.pop(chat_id, None)
+                session_store.update_session(
+                    replace_sid,
+                    image_replace_zip_name=asset.get('file_name', 'rasmlar_qismlari.zip'),
+                    image_replace_zip_ready=True,
+                )
+                await message.answer(
+                    f"⚠️ RAM kolleksiyasi maksimal limitga yetdi.\n\n"
+                    f"🖼️ Jami: <b>{total}</b> ta rasm\n"
+                    f"💾 Hajmi: <b>{total_mb:.1f} MB</b>\n\n"
+                    "Qo'shimcha ZIP qismlari qabul qilinmaydi. Endi 'Rasm almashtirish' oynasini ochishingiz mumkin.",
+                    reply_markup=image_replace_web_keyboard(replace_sid),
+                )
+                return
+
             await message.answer(
-                f"✅ <b>{html.escape(doc.file_name or 'rasmlar.zip')}</b> qabul qilindi.\n\n"
-                f"📦 ZIP RAMga ochildi: <b>{len(images)}</b> ta haqiqiy rasm tayyor.\n"
-                "🔍 Endi saytga ZIP yuborish shart emas — Preview va Tekshirish shu RAMdagi rasmlardan ishlaydi.",
-                reply_markup=kb,
+                f"✅ <b>{html.escape(doc.file_name or 'ZIP qismi')}</b> qabul qilindi.\n\n"
+                f"➕ Shu qismdan yangi qo'shilgan: <b>{len(added)}</b> ta rasm\n"
+                f"🔁 Takrorlangan: <b>{duplicates}</b> ta\n"
+                f"🖼️ RAMdagi jami: <b>{total}</b> ta rasm\n"
+                f"💾 Jami RAM hajmi: <b>{total_mb:.1f} MB</b>\n\n"
+                "📤 Keyingi ZIP qismini ham yuboravering. Barcha qismlar birlashtirib saqlanadi.\n"
+                "Oxirida <b>✅ Barcha ZIP qismlarini yubordim</b> tugmasini bosing.",
+                reply_markup=image_replace_parts_keyboard(),
             )
         except zipfile.BadZipFile:
-            await message.answer("❌ Bu fayl haqiqiy ZIP emas yoki buzilgan.")
+            await message.answer("❌ Bu ZIP qismi haqiqiy ZIP emas yoki buzilgan. Qayta yuboring.")
         except Exception as exc:
-            logger.exception("Rasm ZIPni RAMga ochish xatosi")
+            logger.exception("Rasm ZIP qismini RAMga ochish xatosi")
             msg = str(exc)
             if '20 MB' in msg or 'file is too big' in msg.lower():
                 msg += " Telegram Bot API Cloud 20 MB download limitiga duch kelgan bo'lishi mumkin."
-            await message.answer(f"❌ ZIPni qabul qilish/ochishda xatolik: {html.escape(msg)}")
+            await message.answer(f"❌ ZIP qismini qabul qilish/ochishda xatolik: {html.escape(msg)}")
         return
 
     file = await bot.get_file(doc.file_id)

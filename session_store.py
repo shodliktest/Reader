@@ -111,9 +111,11 @@ def _supabase_list_all():
 
 
 # Image ZIP assetlar ataylab faqat RAM'da saqlanadi.
+# Multipart uploadda har bir ZIP qismi darhol ochiladi va rasmlar bitta
+# `images` ro'yxatiga birlashtiriladi; ZIP baytlarining o'zi saqlanmaydi.
 # Bu Streamlit + bot bitta Python processida ishlaganda umumiy cache vazifasini bajaradi.
-# Restart/deploy bo'lsa RAM tozalanadi va ZIP qayta yuboriladi.
-_user_assets = {}   # str(chat_id) -> {"image_zip": {file_name, uploaded_at, zip_bytes, images}}
+# Restart/deploy bo'lsa RAM tozalanadi va ZIP qismlari qayta yuboriladi.
+_user_assets = {}   # str(chat_id) -> {"image_zip": {images, part_names, part_count, total_bytes, ...}}
 
 
 def get_user_asset(chat_id, name="image_zip"):
