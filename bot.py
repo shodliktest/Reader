@@ -88,6 +88,45 @@ if BOT_TOKEN:
 
 VALID_IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
 
+
+def _extract_image_zip_for_ram(zip_bytes):
+    """ZIPni botning o'z processida ochib, barcha haqiqiy rasmlarni RAMga tayyorlaydi."""
+    items = []
+    total = 0
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+        for info in zf.infolist():
+            name = info.filename.replace('\\', '/')
+            if info.is_dir() or name.startswith('__MACOSX/'):
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in VALID_IMAGE_EXT:
+                continue
+            if '..' in name.split('/'):
+                continue
+            if info.file_size > 30 * 1024 * 1024:
+                continue
+            total += info.file_size
+            if total > 500 * 1024 * 1024:
+                break
+            raw = zf.read(info)
+            try:
+                from PIL import Image
+                im = Image.open(io.BytesIO(raw))
+                im.load()
+                # Faqat haqiqiy ochiladigan rasmlarni qabul qilamiz.
+                width, height = im.width, im.height
+                im.convert('RGB')
+                items.append({
+                    'name': os.path.basename(name),
+                    'path': name,
+                    'data': raw,
+                    'width': width,
+                    'height': height,
+                })
+            except Exception:
+                continue
+    return items
+
 # Foydalanuvchining hozirgi FAOL sessiya ID'sini eslab turish uchun (chat_id -> session_id).
 # Bu RAM'da, chunki har bir foydalanuvchi bir vaqtning o'zida faqat bitta faol
 # to'plash jarayoniga ega bo'lishi kerak (ikkinchisini boshlasa, avvalgisi almashtiriladi).
@@ -102,6 +141,8 @@ _wm_text_mode = set()
 # Fayl yuborilganda darhol qayta ishlanmaydi; foydalanuvchi avval tugmalar orqali
 # "Tekshirish", "Preview" yoki "Watermark sozlamalari"ni tanlaydi.
 _pending_docx = {}
+_image_replace_waiting = {}  # chat_id -> Word session_id
+_last_docx_sessions = {}    # chat_id -> latest Word session
 
 
 def get_watermark_settings(chat_id):
@@ -141,7 +182,7 @@ def docx_web_keyboard(session_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Tekshirish", url=f"{base}&page=watermark")],
         [InlineKeyboardButton(text="🏷️ Emblema almashtirish", url=f"{base}&page=emblem")],
-        [InlineKeyboardButton(text="🖼️ Rasm almashtirish", url=f"{base}&page=image_replace")],
+        [InlineKeyboardButton(text="🖼️ Rasm almashtirish", callback_data=f"imgrep_start:{session_id}")],
     ])
 
 
@@ -319,6 +360,104 @@ async def cmd_watermark(message: Message):
         "Tayyor .docx yuborsangiz ham shu sozlamalar ishlaydi.",
         reply_markup=watermark_settings_keyboard(chat_id),
     )
+
+
+def image_replace_web_keyboard(session_id):
+    if not WEBAPP_BASE_URL:
+        return None
+    url = f"{WEBAPP_BASE_URL}/?session_id={session_id}&page=image_replace"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼️ Rasm almashtirish oynasini ochish", url=url)]
+    ])
+
+
+def image_replace_choice_keyboard(has_saved):
+    rows = []
+    if has_saved:
+        rows.append([InlineKeyboardButton(text="📦 Avval yuklangan ZIP'dan foydalanish", callback_data="imgrep_use_saved")])
+        rows.append([InlineKeyboardButton(text="🗑️ Saqlangan rasmlarni o'chirish", callback_data="imgrep_clear_saved")])
+    rows.append([InlineKeyboardButton(text="📤 Yangi rasmlar.zip yuborish", callback_data="imgrep_new_zip")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("imgrep_start:"))
+async def image_replace_start(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    session_id = callback.data.split(":", 1)[1]
+    data = session_store.get_session(session_id)
+    if not data or data.get("telegram_chat_id") != chat_id or data.get("mode") != "docx":
+        await callback.answer("Word sessiyasi topilmadi. Word faylni qaytadan yuboring.", show_alert=True)
+        return
+    _last_docx_sessions[chat_id] = session_id
+    _image_replace_waiting.pop(chat_id, None)
+    saved = session_store.get_user_asset(chat_id, "image_zip")
+    if saved and (saved.get("images") or saved.get("zip_bytes")):
+        await callback.message.answer(
+            "🖼️ <b>Rasm almashtirish</b>\n\n"
+            "Avval yuklangan <b>rasmlar.zip</b> topildi. Uni ishlatishingiz yoki yangi ZIP yuborishingiz mumkin.",
+            reply_markup=image_replace_choice_keyboard(True),
+        )
+    else:
+        _image_replace_waiting[chat_id] = session_id
+        await callback.message.answer(
+            "🖼️ <b>Rasm almashtirish</b>\n\n"
+            "Iltimos, <b>rasmlar.zip</b> faylini shu chatga yuboring.\n"
+            "ZIP ichidagi rasmlar keyin avtomatik ochilib, moslik bo'yicha tekshiriladi.",
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "imgrep_new_zip")
+async def image_replace_new_zip(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    sid = _last_docx_sessions.get(chat_id)
+    if not sid:
+        await callback.answer("Word sessiyasi topilmadi. Word faylni qaytadan yuboring.", show_alert=True)
+        return
+    _image_replace_waiting[chat_id] = sid
+    await callback.message.answer("📤 Yangi <b>rasmlar.zip</b> faylini shu chatga yuboring.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "imgrep_use_saved")
+async def image_replace_use_saved(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    saved = session_store.get_user_asset(chat_id, "image_zip")
+    if not saved or not (saved.get("images") or saved.get("zip_bytes")):
+        await callback.answer("Saqlangan ZIP topilmadi. Yangi ZIP yuboring.", show_alert=True)
+        return
+    sid = _last_docx_sessions.get(chat_id)
+    if not sid:
+        await callback.answer("Word sessiyasi topilmadi. Wordni qaytadan yuboring.", show_alert=True)
+        return
+    session_store.update_session(
+        sid,
+        image_replace_zip_name=saved.get("file_name", "rasmlar.zip"),
+        image_replace_zip_ready=True,
+    )
+    kb = image_replace_web_keyboard(sid)
+    await callback.message.answer(
+        f"✅ <b>{html.escape(saved.get('file_name','rasmlar.zip'))}</b> tanlandi.\n\n"
+        f"✅ RAMdagi <b>{saved.get('image_count', len(saved.get('images', [])))}</b> ta rasm ishlatishga tayyor.\n\n"
+        "Endi Preview va 🔍 Tekshirish shu RAMdagi rasmlardan ishlaydi.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "imgrep_clear_saved")
+async def image_replace_clear_saved(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    removed = session_store.clear_user_asset(chat_id, "image_zip")
+    _image_replace_waiting.pop(chat_id, None)
+    if removed:
+        await callback.message.answer(
+            "🗑️ Saqlangan rasmlar ZIP/cache RAMdan o'chirildi.\n\n"
+            "📤 Endi yangi <b>rasmlar.zip</b> yuborishingiz mumkin."
+        )
+        await callback.answer("O'chirildi.")
+    else:
+        await callback.answer("RAMda saqlangan ZIP topilmadi.", show_alert=True)
 
 
 @dp.callback_query(F.data == "wm_toggle")
@@ -514,6 +653,59 @@ async def handle_document(message: Message):
     doc = message.document
     fname = (doc.file_name or "").lower()
 
+    # Rasm-almashtirish ZIP'i chatning o'zidan olinadi va DARHOL RAMga ochiladi.
+    # Keyingi Streamlit sahifa Telegramdan qayta download qilmaydi.
+    if fname.endswith('.zip') and chat_id in _image_replace_waiting:
+        replace_sid = _image_replace_waiting.pop(chat_id)
+        try:
+            if getattr(doc, "file_size", 0) and doc.file_size > 20 * 1024 * 1024:
+                await message.answer(
+                    f"❌ <b>{html.escape(doc.file_name or 'rasmlar.zip')}</b> hajmi "
+                    f"{doc.file_size / (1024*1024):.1f} MB.\n\n"
+                    "Oddiy Telegram Bot API Cloud orqali bot bunday faylni yuklab ololmaydi (20 MB limit). "
+                    "ZIPni 20 MB dan kichik qismlarga ajrating yoki Local Bot API Server ishlating."
+                )
+                return
+            file = await bot.get_file(doc.file_id)
+            buf = io.BytesIO()
+            await bot.download_file(file.file_path, destination=buf)
+            zip_bytes = buf.getvalue()
+            images = await asyncio.to_thread(_extract_image_zip_for_ram, zip_bytes)
+            del zip_bytes
+            if not images:
+                await message.answer(
+                    "❌ ZIP ochildi, lekin ichidan o'qiladigan PNG/JPG/JPEG/WEBP/BMP/TIFF rasm topilmadi."
+                )
+                return
+            session_store.set_user_asset(chat_id, "image_zip", {
+                "file_id": doc.file_id,
+                "file_name": doc.file_name or "rasmlar.zip",
+                "uploaded_at": datetime.now().isoformat(),
+                "images": images,
+                "image_count": len(images),
+            })
+            session_store.update_session(
+                replace_sid,
+                image_replace_zip_name=doc.file_name or "rasmlar.zip",
+                image_replace_zip_ready=True,
+            )
+            kb = image_replace_web_keyboard(replace_sid)
+            await message.answer(
+                f"✅ <b>{html.escape(doc.file_name or 'rasmlar.zip')}</b> qabul qilindi.\n\n"
+                f"📦 ZIP RAMga ochildi: <b>{len(images)}</b> ta haqiqiy rasm tayyor.\n"
+                "🔍 Endi saytga ZIP yuborish shart emas — Preview va Tekshirish shu RAMdagi rasmlardan ishlaydi.",
+                reply_markup=kb,
+            )
+        except zipfile.BadZipFile:
+            await message.answer("❌ Bu fayl haqiqiy ZIP emas yoki buzilgan.")
+        except Exception as exc:
+            logger.exception("Rasm ZIPni RAMga ochish xatosi")
+            msg = str(exc)
+            if '20 MB' in msg or 'file is too big' in msg.lower():
+                msg += " Telegram Bot API Cloud 20 MB download limitiga duch kelgan bo'lishi mumkin."
+            await message.answer(f"❌ ZIPni qabul qilish/ochishda xatolik: {html.escape(msg)}")
+        return
+
     file = await bot.get_file(doc.file_id)
     buf = io.BytesIO()
     await bot.download_file(file.file_path, destination=buf)
@@ -537,6 +729,9 @@ async def handle_document(message: Message):
             watermark_settings=get_watermark_settings(chat_id),
             status="ready_for_review",
         )
+        # Rasm almashtirish uchun aynan shu Word sessiyasini keyingi callbackda ishlatamiz.
+        _last_docx_sessions[chat_id] = session_id
+        _image_replace_waiting.pop(chat_id, None)
         mirror_path = f"/tmp/{chat_id}_{doc.file_id}_pending.docx"
         try:
             with open(mirror_path, "wb") as f:

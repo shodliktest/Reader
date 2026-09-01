@@ -45,9 +45,11 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '') or os.environ.get('SUPABASE_SERVICE_KEY', '')
 SUPABASE_TABLE = os.environ.get('SUPABASE_SESSIONS_TABLE', 'bot_sessions')
 USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY and _requests)
+SUPABASE_ASSET_TABLE = os.environ.get('SUPABASE_ASSET_TABLE', 'bot_user_assets')
 
 _lock = threading.Lock()
 _memory_store = {}  # session_id -> dict
+_user_assets = {}   # telegram_chat_id -> persistent-ish asset metadata
 
 
 def new_session_id():
@@ -104,6 +106,66 @@ def _supabase_list_all():
     resp = _requests.get(url, headers=headers, params=params, timeout=10)
     resp.raise_for_status()
     return resp.json()
+
+
+
+
+# Image ZIP assetlar ataylab faqat RAM'da saqlanadi.
+# Bu Streamlit + bot bitta Python processida ishlaganda umumiy cache vazifasini bajaradi.
+# Restart/deploy bo'lsa RAM tozalanadi va ZIP qayta yuboriladi.
+_user_assets = {}   # str(chat_id) -> {"image_zip": {file_name, uploaded_at, zip_bytes, images}}
+
+
+def get_user_asset(chat_id, name="image_zip"):
+    """RAM'dagi foydalanuvchi assetini qaytaradi.
+
+    Image ZIP uchun Telegram file_id emas, ZIP baytlari va ZIPdan chiqarilgan
+    rasmlar RAM'da saqlanadi. Shu sababli Streamlit qayta yuklanganda ham shu
+    process tirik bo'lsa, web sahifa rasmlarni bevosita RAM'dan oladi.
+    """
+    if chat_id is None:
+        return None
+    with _lock:
+        data = _user_assets.get(str(chat_id), {})
+        return data.get(name)
+
+
+def set_user_asset(chat_id, name, asset):
+    """Assetni faqat RAM'ga yozadi. Image ZIP cache uchun disk/Supabase ishlatilmaydi."""
+    if chat_id is None:
+        return asset
+    key = str(chat_id)
+    with _lock:
+        current = _user_assets.get(key, {})
+        current[name] = asset
+        current["updated_at"] = time.time()
+        _user_assets[key] = current
+    return asset
+
+
+def clear_user_asset(chat_id, name="image_zip"):
+    """Foydalanuvchining RAM'dagi assetini o'chiradi."""
+    if chat_id is None:
+        return False
+    with _lock:
+        key = str(chat_id)
+        current = _user_assets.get(key)
+        if not current or name not in current:
+            return False
+        current.pop(name, None)
+        current["updated_at"] = time.time()
+        if current:
+            _user_assets[key] = current
+        else:
+            _user_assets.pop(key, None)
+        return True
+
+
+def load_local_user_asset(chat_id):
+    """Eski API mosligi uchun RAM assetlarini qaytaradi."""
+    if chat_id is None:
+        return {}
+    return _user_assets.get(str(chat_id), {})
 
 
 def create_session(session_id, telegram_user_id, telegram_chat_id, default_filename="natija"):

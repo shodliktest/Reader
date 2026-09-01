@@ -75,6 +75,7 @@ if hasattr(st, 'secrets'):
             pass
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
+VALID_IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp')
 
 st.set_page_config(page_title="Test natijalarini tekshirish", layout="centered")
 
@@ -278,7 +279,7 @@ def send_docx_to_telegram(chat_id, file_path_or_bytes, filename, session_id=None
                 "inline_keyboard": [
                     [{"text": "🔍 Tekshirish", "url": f"{base}&page=watermark"}],
                     [{"text": "🏷️ Emblema almashtirish", "url": f"{base}&page=emblem"}],
-                    [{"text": "🖼️ Rasm almashtirish", "url": f"{base}&page=image_replace"}],
+                    [{"text": "🖼️ Rasm almashtirish", "callback_data": f"imgrep_start:{session_id}"}],
                 ]
             }
 
@@ -760,10 +761,11 @@ def _safe_image_for_word(raw_bytes, target_name):
         return raw_bytes
 
 
-def _extract_uploaded_image_zip(uploaded_bytes):
-    """Foydalanuvchi yuborgan rasmlar.zip ichidan xavfsiz rasm katalogi."""
+def _extract_saved_image_zip(zip_bytes):
+    """Chat orqali saqlangan rasmlar.zip ni ochib, haqiqiy rasmlarni qaytaradi."""
     items = []
-    with zipfile.ZipFile(io.BytesIO(uploaded_bytes), 'r') as zf:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+        total_uncompressed = 0
         for info in zf.infolist():
             name = info.filename.replace('\\', '/')
             if info.is_dir() or name.startswith('__MACOSX/'):
@@ -771,19 +773,30 @@ def _extract_uploaded_image_zip(uploaded_bytes):
             ext = os.path.splitext(name)[1].lower()
             if ext not in VALID_IMAGE_EXT:
                 continue
-            # Zip-slip va haddan tashqari katta entrylardan himoya.
-            if '..' in name.split('/') or info.file_size > 30 * 1024 * 1024:
+            if '..' in name.split('/'):
                 continue
+            # Har bir rasm va umumiy unpack hajmi uchun xavfsiz limit.
+            if info.file_size > 30 * 1024 * 1024:
+                continue
+            total_uncompressed += info.file_size
+            if total_uncompressed > 500 * 1024 * 1024:
+                break
             raw = zf.read(info)
             try:
-                im = Image.open(io.BytesIO(raw)); im.load()
-                # preview/algoritm uchun haqiqiy image ekanini tekshiramiz.
+                im = Image.open(io.BytesIO(raw))
+                im.load()
                 im.convert('RGB')
-                items.append({'name': os.path.basename(name), 'path': name, 'data': raw})
+                items.append({
+                    'name': os.path.basename(name),
+                    'path': name,
+                    'data': raw,
+                    'width': im.width,
+                    'height': im.height,
+                })
             except Exception:
+                # WebM bu ro'yxatda ataylab yo'q: u video konteyner, oddiy rasm emas.
                 continue
     return items
-
 
 def _render_image_replace_editor(data):
     """PRO image replacement workflow.
@@ -798,7 +811,7 @@ def _render_image_replace_editor(data):
     6) Alohida tugma orqali yakuniy Word Telegramga yuboriladi.
     """
     st.title("🖼️ Rasm almashtirish — PRO")
-    st.caption("Yangi rasmlar manbasi faqat siz yuboradigan rasmlar.zip. Word yaratish/yuborishdan oldin barcha variantlarni tekshirish mumkin.")
+    st.caption("Yangi rasmlar manbasi faqat Telegram chat orqali yuborilgan rasmlar.zip. Bot ZIPni bir marta ochib, rasmlarni RAMga tayyorlaydi; sayt ZIP qabul qilmaydi.")
 
     docx_b64 = data.get("docx_b64", "")
     if not docx_b64:
@@ -822,14 +835,19 @@ def _render_image_replace_editor(data):
         st.warning("⚠️ Word ichida o'qiladigan rasm topilmadi.")
         return
 
-    # Har bir qayta yuklanishda tanlovlar saqlanadi, lekin yangi Word/ZIP uchun
-    # aniq sessiya kaliti ishlatiladi.
+    # Har bir qayta yuklanishda tanlovlar saqlanadi. ZIPning o'zi browser uploader
+    # orqali emas, Telegram chatdagi file_id orqali olinadi.
     sid = data.get("session_id", "unknown")
-    st.session_state.setdefault("imgrep_zip_items", [])
-    st.session_state.setdefault("imgrep_ranked", [])
-    st.session_state.setdefault("imgrep_candidate_idx", None)
-    st.session_state.setdefault("imgrep_zip_name", "")
-    st.session_state.setdefault("imgrep_working_docx_b64", docx_b64)
+    k_zip = f"imgrep_zip_items_{sid}"
+    k_ranked = f"imgrep_ranked_{sid}"
+    k_candidate = f"imgrep_candidate_idx_{sid}"
+    k_zip_name = f"imgrep_zip_name_{sid}"
+    k_working = f"imgrep_working_docx_b64_{sid}"
+    st.session_state.setdefault(k_zip, [])
+    st.session_state.setdefault(k_ranked, [])
+    st.session_state.setdefault(k_candidate, None)
+    st.session_state.setdefault(k_zip_name, data.get("image_replace_zip_name", ""))
+    st.session_state.setdefault(k_working, docx_b64)
 
     names = [x["name"] for x in valid]
     selected = st.selectbox(
@@ -845,48 +863,34 @@ def _render_image_replace_editor(data):
     with c1:
         st.image(old_bytes, caption=f"🟥 AVVALGI • {old_item['name']}", use_container_width=True)
     with c2:
-        st.info("🔁 Almashtirish uchun pastdagi tugma orqali rasmlar.zip yuboring.")
+        st.info("📦 Yangi rasmlar bot chatiga yuborilgan rasmlar.zip faylidan olinadi.")
 
     st.divider()
     st.subheader("2️⃣ Yangi rasmlar manbasi")
-    if st.button("🔄 ZIPni almashtirish / rasmlar.zip yuborish", use_container_width=True, type="primary", key="imgrep_ask_zip"):
-        st.session_state["imgrep_waiting_zip"] = True
-        st.session_state["imgrep_zip_items"] = []
-        st.session_state["imgrep_ranked"] = []
-        st.session_state["imgrep_candidate_idx"] = None
-        st.rerun()
+    saved_asset = session_store.get_user_asset(data.get("telegram_chat_id"), "image_zip") if data.get("telegram_chat_id") else None
+    saved_asset = saved_asset or {}
+    saved_name = data.get("image_replace_zip_name") or saved_asset.get("file_name") or "rasmlar.zip"
 
-    if st.session_state.get("imgrep_waiting_zip") or not st.session_state.get("imgrep_zip_items"):
-        zip_file = st.file_uploader(
-            "📦 Rasmlar ZIP faylini tanlang",
-            type=["zip"],
-            key=f"imgrep_zip_uploader_{sid}",
-            help="ZIP ichiga PNG/JPG/JPEG/WEBP/BMP/TIFF rasmlarni joylang. Bot boshqa manbadan yangi rasm olmaydi.",
-        )
-        if zip_file:
-            try:
-                raw_zip = zip_file.getvalue()
-                items = _extract_uploaded_image_zip(raw_zip)
-                if not items:
-                    st.error("❌ ZIP ichidan o'qiladigan rasm topilmadi.")
-                else:
-                    st.session_state["imgrep_zip_items"] = items
-                    st.session_state["imgrep_zip_name"] = zip_file.name
-                    st.session_state["imgrep_waiting_zip"] = False
-                    st.session_state["imgrep_ranked"] = []
-                    st.session_state["imgrep_candidate_idx"] = None
-                    st.success(f"✅ {zip_file.name}: {len(items)} ta rasm qabul qilindi.")
-            except zipfile.BadZipFile:
-                st.error("❌ Fayl haqiqiy ZIP emas yoki buzilgan.")
-            except Exception as exc:
-                st.error(f"❌ ZIPni ochishda xatolik: {exc}")
-
-    zip_items = st.session_state.get("imgrep_zip_items", [])
-    if not zip_items:
-        st.info("⬆️ Avval rasmlar.zip yuboring. Keyin '🔍 Tekshirish' orqali mos rasmlarni topamiz.")
+    if saved_asset.get("images"):
+        # Eng muhim nuqta: Telegramdan qayta download YO'Q.
+        # Bot allaqachon ZIPni ochib, barcha rasmlarni RAMga joylagan.
+        items = saved_asset["images"]
+        if st.session_state.get(k_zip_name) != saved_name or len(st.session_state.get(k_zip, [])) != len(items):
+            st.session_state[k_zip] = items
+            st.session_state[k_zip_name] = saved_name
+            st.session_state[k_ranked] = []
+            st.session_state[k_candidate] = None
+        st.success(f"📦 RAMdagi manba: {saved_name} • {len(items)} ta rasm")
+    else:
+        st.warning("⬆️ Avval Telegram chatida 'Rasm almashtirish' tugmasini bosib rasmlar.zip yuboring.")
         return
 
-    st.success(f"📦 Manba: {st.session_state.get('imgrep_zip_name','rasmlar.zip')} • {len(zip_items)} ta rasm")
+    zip_items = st.session_state.get(k_zip, [])
+    if not zip_items:
+        st.info("🔍 ZIP ochilgach, 'Tekshirish' orqali mos rasmlarni topamiz.")
+        return
+
+    st.success(f"📦 Manba: {st.session_state.get(k_zip_name, saved_name)} • {len(zip_items)} ta rasm")
 
     st.subheader("3️⃣ Tekshirish")
     st.write("Eski rasm ZIP ichidagi barcha rasmlar bilan solishtiriladi. Eng moslari yuqoriga chiqadi.")
@@ -898,11 +902,11 @@ def _render_image_replace_editor(data):
             ranked.append((sc, i))
             progress.progress((i + 1) / len(zip_items))
         ranked.sort(reverse=True, key=lambda x: x[0])
-        st.session_state["imgrep_ranked"] = ranked[:12]
-        st.session_state["imgrep_candidate_idx"] = None
+        st.session_state[k_ranked] = ranked[:12]
+        st.session_state[k_candidate] = None
         st.success(f"✅ {len(zip_items)} ta rasm tekshirildi. Eng mos {min(12,len(ranked))} ta variant tayyor.")
 
-    ranked = st.session_state.get("imgrep_ranked", [])
+    ranked = st.session_state.get(k_ranked, [])
     if not ranked:
         st.info("🔍 'Tekshirish' tugmasini bosing.")
         return
@@ -914,10 +918,10 @@ def _render_image_replace_editor(data):
         with cols[n % len(cols)]:
             st.image(item["data"], caption=f"#{n+1} • {sc:.0%}\n{item['name']}", use_container_width=True)
             if st.button("✅ Tanlash", key=f"imgrep_zip_pick_{sid}_{idx}", use_container_width=True):
-                st.session_state["imgrep_candidate_idx"] = idx
+                st.session_state[k_candidate] = idx
                 st.rerun()
 
-    candidate_idx = st.session_state.get("imgrep_candidate_idx")
+    candidate_idx = st.session_state.get(k_candidate)
     if candidate_idx is None or not (0 <= candidate_idx < len(zip_items)):
         st.info("⬆️ Variantlardan birini tanlang — keyin OLD/NEW preview chiqadi.")
         return
@@ -940,19 +944,19 @@ def _render_image_replace_editor(data):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🔄 Boshqa variantni tanlash", use_container_width=True):
-            st.session_state["imgrep_candidate_idx"] = None
+            st.session_state[k_candidate] = None
             st.rerun()
     with c2:
         if st.button("✅ Shu rasmni Word'ga qo'llash", use_container_width=True, type="primary"):
             try:
                 replacement = _safe_image_for_word(candidate_bytes, old_item["name"])
-                working_docx = base64.b64decode(st.session_state.get("imgrep_working_docx_b64", docx_b64), validate=True)
+                working_docx = base64.b64decode(st.session_state.get(k_working, docx_b64), validate=True)
                 output_bytes = _replace_docx_media_bytes(working_docx, old_item["name"], replacement)
-                st.session_state["imgrep_working_docx_b64"] = base64.b64encode(output_bytes).decode("ascii")
+                st.session_state[k_working] = base64.b64encode(output_bytes).decode("ascii")
                 # Muhim: keyingi Tekshirish sahifasi ham aynan yangilangan Word'ni ko'radi.
                 session_store.update_session(sid, docx_b64=base64.b64encode(output_bytes).decode("ascii"), status="ready_for_review")
-                st.session_state["imgrep_candidate_idx"] = None
-                st.session_state["imgrep_ranked"] = []
+                st.session_state[k_candidate] = None
+                st.session_state[k_ranked] = []
                 st.success("✅ Rasm Word ichiga qo'llandi. Hali Telegramga yuborilmadi.")
                 st.info("Endi boshqa rasmni ham almashtirishingiz yoki 🔍 Tekshirish sahifasiga o'tib yakuniy Word yaratishingiz mumkin.")
             except Exception as exc:
@@ -961,7 +965,7 @@ def _render_image_replace_editor(data):
     st.divider()
     st.subheader("7️⃣ Yakuniy Word")
     st.caption("Barcha rasm almashtirishlar tugagachgina Word'ni Telegramga yuboring.")
-    working = st.session_state.get("imgrep_working_docx_b64", docx_b64)
+    working = st.session_state.get(k_working, docx_b64)
     if st.button("📄 Yangilangan Wordni Telegramga yuborish", use_container_width=True, type="primary", key="imgrep_send_final"):
         try:
             out = base64.b64decode(working, validate=True)
