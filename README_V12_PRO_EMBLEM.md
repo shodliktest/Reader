@@ -17,3 +17,13 @@ This version is based on the working V11 project and fixes the two failures obse
 ## Important limitation
 
 No computer-vision algorithm can guarantee recognition after arbitrary destruction, severe blur, or when the emblem has been completely removed. The manual crop workflow remains available as the deterministic fallback.
+
+
+## Rasm almashtirish — yangi modul
+
+- Word yuborilgandan keyin `🖼️ Rasm almashtirish` tugmasi chiqadi.
+- Word ichidagi rasm tanlanadi va yangi rasm yuklanadi.
+- Eski va yangi rasm OLD/NEW ko‘rinishida yonma-yon preview qilinadi.
+- Noto‘g‘ri bo‘lsa Word ichidagi vizual jihatdan o‘xshash boshqa rasmlar reytingi ko‘rsatiladi.
+- Tasdiqlangandan keyin faqat tanlangan `word/media/*` rasmi almashtiriladi.
+- Yangilangan DOCX Telegramga qaytariladi.

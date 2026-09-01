@@ -35,6 +35,7 @@ import sys
 import io
 import base64
 import json
+import zipfile
 import requests
 import streamlit as st
 from PIL import Image
@@ -277,6 +278,7 @@ def send_docx_to_telegram(chat_id, file_path_or_bytes, filename, session_id=None
                 "inline_keyboard": [
                     [{"text": "🔍 Tekshirish", "url": f"{base}&page=watermark"}],
                     [{"text": "🏷️ Emblema almashtirish", "url": f"{base}&page=emblem"}],
+                    [{"text": "🖼️ Rasm almashtirish", "url": f"{base}&page=image_replace"}],
                 ]
             }
 
@@ -671,6 +673,309 @@ def _render_watermark_editor(data, docx_mode=False):
                     except Exception: pass
     return
 
+def _image_bytes_preview(raw, max_side=900):
+    """Rasmni Streamlit preview uchun xavfsiz ochadi."""
+    im = Image.open(io.BytesIO(raw))
+    im.load()
+    return im.convert("RGB")
+
+
+def _image_similarity(a_bytes, b_bytes):
+    """Ikki rasmning ko'rinish o'xshashligini taxminiy 0..1 ballga aylantiradi.
+    Bu aynan bir xil rasmni topishdan tashqari, o'xshash sahifa/formatdagi
+    rasmlarni ham yuqoriga chiqaradi."""
+    try:
+        a = _image_bytes_preview(a_bytes).resize((96, 96), Image.Resampling.LANCZOS)
+        b = _image_bytes_preview(b_bytes).resize((96, 96), Image.Resampling.LANCZOS)
+        import numpy as np
+        aa = np.asarray(a, dtype=np.float32) / 255.0
+        bb = np.asarray(b, dtype=np.float32) / 255.0
+        # Geometrik ko'rinish
+        mse = float(np.mean((aa - bb) ** 2))
+        pixel_score = max(0.0, 1.0 - mse / 0.20)
+        # Rang taqsimoti
+        ah, _ = np.histogram(aa.reshape(-1), bins=32, range=(0,1), density=True)
+        bh, _ = np.histogram(bb.reshape(-1), bins=32, range=(0,1), density=True)
+        ah = ah / (np.linalg.norm(ah) + 1e-8)
+        bh = bh / (np.linalg.norm(bh) + 1e-8)
+        hist_score = float(np.clip(np.dot(ah, bh), 0, 1))
+        # O'lcham nisbati
+        ai = _image_bytes_preview(a_bytes)
+        bi = _image_bytes_preview(b_bytes)
+        ar = ai.width / max(ai.height, 1)
+        br = bi.width / max(bi.height, 1)
+        ratio_score = max(0.0, 1.0 - abs(ar-br) / max(ar, br, 1e-6))
+        return float(np.clip(0.65*pixel_score + 0.25*hist_score + 0.10*ratio_score, 0, 1))
+    except Exception:
+        return 0.0
+
+
+def _replace_docx_media_bytes(docx_bytes, media_name, new_image_bytes):
+    """DOCX ichidagi word/media/<media_name> ni yangi rasm bilan almashtiradi.
+    ZIP metadata va qolgan fayllar saqlanadi."""
+    src = io.BytesIO(docx_bytes)
+    out = io.BytesIO()
+    replaced = False
+    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename.startswith("word/media/") and os.path.basename(info.filename) == media_name:
+                data = new_image_bytes
+                replaced = True
+            zout.writestr(info, data)
+    if not replaced:
+        raise FileNotFoundError(f"Word media topilmadi: {media_name}")
+    return out.getvalue()
+
+
+def _safe_image_for_word(raw_bytes, target_name):
+    """ZIP'dan kelgan rasmni Word media faylining mavjud formatiga moslaydi.
+    Masalan, word/media/image1.jpeg o'rniga PNG baytlarini yozib yuborish
+    Word viewer'larda muammo berishi mumkin. Shu sababli target extension
+    saqlanadi va rasm qayta encode qilinadi."""
+    ext = os.path.splitext(target_name)[1].lower()
+    fmt = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP',
+           '.bmp': 'BMP', '.tif': 'TIFF', '.tiff': 'TIFF'}.get(ext)
+    if not fmt:
+        return raw_bytes
+    try:
+        im = Image.open(io.BytesIO(raw_bytes))
+        im.load()
+        if fmt == 'JPEG' and im.mode not in ('RGB', 'L'):
+            bg = Image.new('RGB', im.size, 'white')
+            if 'A' in im.getbands():
+                bg.paste(im, mask=im.getchannel('A'))
+            else:
+                bg.paste(im.convert('RGB'))
+            im = bg
+        elif fmt != 'JPEG' and im.mode not in ('RGB', 'RGBA', 'L'):
+            im = im.convert('RGBA' if 'A' in im.getbands() else 'RGB')
+        out = io.BytesIO()
+        save_kwargs = {'format': fmt}
+        if fmt in ('JPEG', 'WEBP'):
+            save_kwargs['quality'] = 95
+        im.save(out, **save_kwargs)
+        return out.getvalue()
+    except Exception:
+        return raw_bytes
+
+
+def _extract_uploaded_image_zip(uploaded_bytes):
+    """Foydalanuvchi yuborgan rasmlar.zip ichidan xavfsiz rasm katalogi."""
+    items = []
+    with zipfile.ZipFile(io.BytesIO(uploaded_bytes), 'r') as zf:
+        for info in zf.infolist():
+            name = info.filename.replace('\\', '/')
+            if info.is_dir() or name.startswith('__MACOSX/'):
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in VALID_IMAGE_EXT:
+                continue
+            # Zip-slip va haddan tashqari katta entrylardan himoya.
+            if '..' in name.split('/') or info.file_size > 30 * 1024 * 1024:
+                continue
+            raw = zf.read(info)
+            try:
+                im = Image.open(io.BytesIO(raw)); im.load()
+                # preview/algoritm uchun haqiqiy image ekanini tekshiramiz.
+                im.convert('RGB')
+                items.append({'name': os.path.basename(name), 'path': name, 'data': raw})
+            except Exception:
+                continue
+    return items
+
+
+def _render_image_replace_editor(data):
+    """PRO image replacement workflow.
+
+    Yangi rasmlar faqat foydalanuvchi yuborgan ZIP'dan olinadi.
+    1) Word'dagi eski rasm tanlanadi.
+    2) 'Almashtirish' bosilganda rasmlar.zip so'raladi.
+    3) ZIP ochiladi, 'Tekshirish' bosilganda eski rasm bilan barcha ZIP
+       rasmlari taqqoslanadi va eng o'xshashlari reyting qilinadi.
+    4) Variant tanlanadi -> OLD/NEW/boshqa variantlar preview qilinadi.
+    5) Faqat tasdiqlangandan keyin Word sessiyada yangilanadi.
+    6) Alohida tugma orqali yakuniy Word Telegramga yuboriladi.
+    """
+    st.title("🖼️ Rasm almashtirish — PRO")
+    st.caption("Yangi rasmlar manbasi faqat siz yuboradigan rasmlar.zip. Word yaratish/yuborishdan oldin barcha variantlarni tekshirish mumkin.")
+
+    docx_b64 = data.get("docx_b64", "")
+    if not docx_b64:
+        st.error("❌ Word fayl ma'lumoti topilmadi.")
+        return
+    try:
+        docx_bytes = base64.b64decode(docx_b64, validate=True)
+        sources = _session_image_sources(data, docx_mode=True)
+    except Exception as exc:
+        st.error(f"❌ Word rasmlarini o'qib bo'lmadi: {exc}")
+        return
+
+    valid = []
+    for item in sources:
+        try:
+            _image_bytes_preview(item["data"])
+            valid.append(item)
+        except Exception:
+            pass
+    if not valid:
+        st.warning("⚠️ Word ichida o'qiladigan rasm topilmadi.")
+        return
+
+    # Har bir qayta yuklanishda tanlovlar saqlanadi, lekin yangi Word/ZIP uchun
+    # aniq sessiya kaliti ishlatiladi.
+    sid = data.get("session_id", "unknown")
+    st.session_state.setdefault("imgrep_zip_items", [])
+    st.session_state.setdefault("imgrep_ranked", [])
+    st.session_state.setdefault("imgrep_candidate_idx", None)
+    st.session_state.setdefault("imgrep_zip_name", "")
+    st.session_state.setdefault("imgrep_working_docx_b64", docx_b64)
+
+    names = [x["name"] for x in valid]
+    selected = st.selectbox(
+        "1️⃣ Word ichidan almashtiriladigan AVVALGI rasmni tanlang",
+        range(len(valid)),
+        format_func=lambda i: f"{i+1}. {names[i]}" + (" ⚠️ CRC" if valid[i].get("crc_bad") else ""),
+        key=f"imgrep_source_idx_{sid}",
+    )
+    old_item = valid[selected]
+    old_bytes = old_item["data"]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.image(old_bytes, caption=f"🟥 AVVALGI • {old_item['name']}", use_container_width=True)
+    with c2:
+        st.info("🔁 Almashtirish uchun pastdagi tugma orqali rasmlar.zip yuboring.")
+
+    st.divider()
+    st.subheader("2️⃣ Yangi rasmlar manbasi")
+    if st.button("🔄 ZIPni almashtirish / rasmlar.zip yuborish", use_container_width=True, type="primary", key="imgrep_ask_zip"):
+        st.session_state["imgrep_waiting_zip"] = True
+        st.session_state["imgrep_zip_items"] = []
+        st.session_state["imgrep_ranked"] = []
+        st.session_state["imgrep_candidate_idx"] = None
+        st.rerun()
+
+    if st.session_state.get("imgrep_waiting_zip") or not st.session_state.get("imgrep_zip_items"):
+        zip_file = st.file_uploader(
+            "📦 Rasmlar ZIP faylini tanlang",
+            type=["zip"],
+            key=f"imgrep_zip_uploader_{sid}",
+            help="ZIP ichiga PNG/JPG/JPEG/WEBP/BMP/TIFF rasmlarni joylang. Bot boshqa manbadan yangi rasm olmaydi.",
+        )
+        if zip_file:
+            try:
+                raw_zip = zip_file.getvalue()
+                items = _extract_uploaded_image_zip(raw_zip)
+                if not items:
+                    st.error("❌ ZIP ichidan o'qiladigan rasm topilmadi.")
+                else:
+                    st.session_state["imgrep_zip_items"] = items
+                    st.session_state["imgrep_zip_name"] = zip_file.name
+                    st.session_state["imgrep_waiting_zip"] = False
+                    st.session_state["imgrep_ranked"] = []
+                    st.session_state["imgrep_candidate_idx"] = None
+                    st.success(f"✅ {zip_file.name}: {len(items)} ta rasm qabul qilindi.")
+            except zipfile.BadZipFile:
+                st.error("❌ Fayl haqiqiy ZIP emas yoki buzilgan.")
+            except Exception as exc:
+                st.error(f"❌ ZIPni ochishda xatolik: {exc}")
+
+    zip_items = st.session_state.get("imgrep_zip_items", [])
+    if not zip_items:
+        st.info("⬆️ Avval rasmlar.zip yuboring. Keyin '🔍 Tekshirish' orqali mos rasmlarni topamiz.")
+        return
+
+    st.success(f"📦 Manba: {st.session_state.get('imgrep_zip_name','rasmlar.zip')} • {len(zip_items)} ta rasm")
+
+    st.subheader("3️⃣ Tekshirish")
+    st.write("Eski rasm ZIP ichidagi barcha rasmlar bilan solishtiriladi. Eng moslari yuqoriga chiqadi.")
+    if st.button("🔍 Tekshirish — eng o'xshash rasmlarni topish", use_container_width=True, type="primary", key="imgrep_check"):
+        ranked = []
+        progress = st.progress(0)
+        for i, item in enumerate(zip_items):
+            sc = _image_similarity(old_bytes, item["data"])
+            ranked.append((sc, i))
+            progress.progress((i + 1) / len(zip_items))
+        ranked.sort(reverse=True, key=lambda x: x[0])
+        st.session_state["imgrep_ranked"] = ranked[:12]
+        st.session_state["imgrep_candidate_idx"] = None
+        st.success(f"✅ {len(zip_items)} ta rasm tekshirildi. Eng mos {min(12,len(ranked))} ta variant tayyor.")
+
+    ranked = st.session_state.get("imgrep_ranked", [])
+    if not ranked:
+        st.info("🔍 'Tekshirish' tugmasini bosing.")
+        return
+
+    st.subheader("4️⃣ Eng o'xshash variantlar")
+    cols = st.columns(min(4, len(ranked)))
+    for n, (sc, idx) in enumerate(ranked):
+        item = zip_items[idx]
+        with cols[n % len(cols)]:
+            st.image(item["data"], caption=f"#{n+1} • {sc:.0%}\n{item['name']}", use_container_width=True)
+            if st.button("✅ Tanlash", key=f"imgrep_zip_pick_{sid}_{idx}", use_container_width=True):
+                st.session_state["imgrep_candidate_idx"] = idx
+                st.rerun()
+
+    candidate_idx = st.session_state.get("imgrep_candidate_idx")
+    if candidate_idx is None or not (0 <= candidate_idx < len(zip_items)):
+        st.info("⬆️ Variantlardan birini tanlang — keyin OLD/NEW preview chiqadi.")
+        return
+
+    candidate = zip_items[candidate_idx]
+    candidate_bytes = candidate["data"]
+    score = _image_similarity(old_bytes, candidate_bytes)
+
+    st.divider()
+    st.subheader("5️⃣ Yakuniy Preview — AVVALGI / HOZIRGI")
+    a, b = st.columns(2)
+    with a:
+        st.image(old_bytes, caption=f"🟥 AVVALGI RASM • {old_item['name']}", use_container_width=True)
+    with b:
+        st.image(candidate_bytes, caption=f"🟩 HOZIRGI RASM • {candidate['name']} • {score:.0%}", use_container_width=True)
+    st.success(f"Tanlangan variant: {candidate['name']} • vizual moslik: {score:.0%}")
+
+    # Shu rasmni Word'ga qo'llashdan oldin yana bir qat'iy tasdiq.
+    st.subheader("6️⃣ Tasdiqlash")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Boshqa variantni tanlash", use_container_width=True):
+            st.session_state["imgrep_candidate_idx"] = None
+            st.rerun()
+    with c2:
+        if st.button("✅ Shu rasmni Word'ga qo'llash", use_container_width=True, type="primary"):
+            try:
+                replacement = _safe_image_for_word(candidate_bytes, old_item["name"])
+                working_docx = base64.b64decode(st.session_state.get("imgrep_working_docx_b64", docx_b64), validate=True)
+                output_bytes = _replace_docx_media_bytes(working_docx, old_item["name"], replacement)
+                st.session_state["imgrep_working_docx_b64"] = base64.b64encode(output_bytes).decode("ascii")
+                # Muhim: keyingi Tekshirish sahifasi ham aynan yangilangan Word'ni ko'radi.
+                session_store.update_session(sid, docx_b64=base64.b64encode(output_bytes).decode("ascii"), status="ready_for_review")
+                st.session_state["imgrep_candidate_idx"] = None
+                st.session_state["imgrep_ranked"] = []
+                st.success("✅ Rasm Word ichiga qo'llandi. Hali Telegramga yuborilmadi.")
+                st.info("Endi boshqa rasmni ham almashtirishingiz yoki 🔍 Tekshirish sahifasiga o'tib yakuniy Word yaratishingiz mumkin.")
+            except Exception as exc:
+                st.error(f"❌ Rasmni Word'ga qo'llashda xatolik: {exc}")
+
+    st.divider()
+    st.subheader("7️⃣ Yakuniy Word")
+    st.caption("Barcha rasm almashtirishlar tugagachgina Word'ni Telegramga yuboring.")
+    working = st.session_state.get("imgrep_working_docx_b64", docx_b64)
+    if st.button("📄 Yangilangan Wordni Telegramga yuborish", use_container_width=True, type="primary", key="imgrep_send_final"):
+        try:
+            out = base64.b64decode(working, validate=True)
+            filename = data.get("default_filename", "rasm_almashtirilgan.docx")
+            if not filename.lower().endswith(".docx"):
+                filename += ".docx"
+            ok = send_docx_to_telegram(data.get("telegram_chat_id"), out, filename, session_id=sid)
+            if ok:
+                session_store.update_session(sid, docx_b64=working, status="ready_for_review")
+                st.success("✅ Yakuniy Word Telegramga yuborildi.")
+        except Exception as exc:
+            st.error(f"❌ Word yuborishda xatolik: {exc}")
+
+
 def main():
     ensure_bot_running()
 
@@ -704,6 +1009,8 @@ def main():
         st.caption(f"Fayl: {data.get('default_filename','document.docx')}")
         if page == "emblem":
             _render_emblem_editor(data, docx_mode=True)
+        elif page == "image_replace":
+            _render_image_replace_editor(data)
         else:
             _render_watermark_editor(data, docx_mode=True)
         return

@@ -141,6 +141,7 @@ def docx_web_keyboard(session_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Tekshirish", url=f"{base}&page=watermark")],
         [InlineKeyboardButton(text="🏷️ Emblema almashtirish", url=f"{base}&page=emblem")],
+        [InlineKeyboardButton(text="🖼️ Rasm almashtirish", url=f"{base}&page=image_replace")],
     ])
 
 
